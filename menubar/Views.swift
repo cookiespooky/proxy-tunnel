@@ -1,6 +1,7 @@
 // Окошко в строке меню и окно настроек.
 import SwiftUI
 import AppKit
+import Combine
 
 /// Приглушённые цвета в духе iOS.
 enum Palette {
@@ -517,7 +518,57 @@ struct SettingsView: View {
 
 }
 
+/// Значок в строке меню и панель под ним — своими силами, а не MenuBarExtra:
+/// панель MenuBarExtra нельзя открыть из кода, а её нужно показать сразу при запуске.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var item: NSStatusItem?
+    private let popover = NSPopover()
+    private var watch: AnyCancellable?
+    private var model: Model?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let m = Model()
+        model = m
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.target = self
+        item.button?.action = #selector(togglePanel)
+        self.item = item
+
+        let hc = NSHostingController(rootView: PanelView(m: m))
+        hc.sizingOptions = [.preferredContentSize]   // панель растёт и сжимается вместе с содержимым
+        popover.contentViewController = hc
+        popover.behavior = .transient                 // щелчок мимо — закрывается, как у меню
+        popover.animates = false
+
+        setIcon(m.icon)
+        watch = m.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.setIcon(m.icon) }
+        }
+        // Настроенный туннель: сразу показать панель (туннель при запуске выключен — включают по карточке).
+        // Ненастроенный: как раньше, откроется окно настроек.
+        if m.config.isComplete {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.showPanel() }
+        }
+    }
+
+    private func setIcon(_ name: String) {
+        let img = NSImage(systemSymbolName: name, accessibilityDescription: "Proxy Tunnel")
+        img?.isTemplate = true
+        item?.button?.image = img
+    }
+
+    func showPanel() {
+        guard let b = item?.button else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+    }
+
+    @objc private func togglePanel() {
+        popover.isShown ? popover.performClose(nil) : showPanel()
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         Model.current?.removeSystemSettingsSync()
         Model.current?.tunnel.stop()
@@ -528,16 +579,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct ProxyTunnelApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject private var m = Model()
 
     var body: some Scene {
-        MenuBarExtra {
-            PanelView(m: m)
-        } label: {
-            Image(systemName: m.icon)
-        }
-        .menuBarExtraStyle(.window)
-
+        Settings { EmptyView() }   // окон у приложения нет: значок и панель — в AppDelegate
     }
 }
 

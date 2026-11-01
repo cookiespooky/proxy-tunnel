@@ -109,6 +109,8 @@ final class Model: ObservableObject {
     @Published var applied = false
     /// Туннель включён пользователем (нажатием на верхнюю карточку). При запуске приложения — выключен.
     @Published var enabled = false
+    /// Туннель только что включили — сказать об этом, когда закончатся проверки.
+    private var announceOn = false
     @Published var steps: [Step] = []
     @Published var verdictOK = false
     @Published var busy = false
@@ -258,7 +260,7 @@ final class Model: ObservableObject {
         let r = await Task.detached { Model.applyPAC(url) }.value
         foreignPAC = r.foreign
         if !applied || !ccWasSet {
-            message = "Туннель включён для Claude. Перезапустите Claude, если он был открыт."
+            announceOn = true   // сообщение — когда проверки пройдут, не раньше
         }
         applied = true
         return r.error
@@ -302,6 +304,10 @@ final class Model: ObservableObject {
             if let e = await applySystemSettings() { message = e }
             await checkTunnel()
             steps = work
+            if announceOn {
+                announceOn = false
+                message = verdictOK ? "Туннель включён для Claude. Перезапустите Claude, если он был открыт." : ""
+            }
             checkedAt = Date()
             checking = false
             busy = false
