@@ -1,4 +1,4 @@
-// Режим (туннель / VPN), проверки по шагам, применение настроек.
+// Туннель для Claude: системные настройки, проверки по шагам, настройка сервера.
 import SwiftUI
 import ServiceManagement
 
@@ -97,20 +97,18 @@ enum ClaudeSettings {
     }
 }
 
-let tunnelSteps = ["Туннель подключён", "Выход через туннель", "PAC включён", "PAC раздаётся", "Прокси в Claude Code"]
+let tunnelSteps = ["Туннель подключён", "Выход через туннель", "Claude Code → туннель", "Браузер и приложение Claude → туннель"]
 
 @MainActor
 final class Model: ObservableObject {
     static var current: Model?
 
     @Published var config: Config
-    @Published var mode = "?"            // tunnel | vpn | mixed
-    /// Вкладка окошка значка. Совпадает с режимом, кроме одного случая: туннель ещё не настроен,
-    /// а пользователь открыл вкладку «Туннель» — там настройка, а режим остаётся VPN.
-    @Published var tab = "tunnel"
-    @Published var steps: [Step] = makeSteps(tunnelSteps)
+    /// Прокси для Claude Code и PAC включены — система ходит к выбранным доменам через туннель.
+    /// Включаются сами, как только сервер настроен; снимаются при выходе из приложения.
+    @Published var applied = false
+    @Published var steps: [Step] = []
     @Published var verdictOK = false
-    @Published var directLoc = ""
     @Published var busy = false
     @Published var checking = false
     @Published var message = ""
@@ -125,7 +123,7 @@ final class Model: ObservableObject {
         Model.current = self
         Task { await self.startServices() }
         if !config.isComplete {
-            // Первый запуск: сразу открыть настройки с шагами.
+            // Первый запуск: сразу открыть настройки.
             Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 800_000_000)
                 guard let self else { return }
@@ -142,11 +140,8 @@ final class Model: ObservableObject {
     }
 
     var icon: String {
-        switch mode {
-        case "tunnel": return verdictOK ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
-        case "vpn": return "shield.lefthalf.filled"
-        default: return "questionmark.circle"
-        }
+        guard config.isComplete else { return "questionmark.circle" }
+        return verdictOK ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
     }
 
     /// Запускает PAC и туннель по текущим настройкам; старый ssh на том же пробросе гасит.
@@ -154,22 +149,21 @@ final class Model: ObservableObject {
         pac.start(port: config.pacPort, text: config.pacText)
         tunnel.stop()
         _ = await run(["/usr/bin/pkill", "-f", "--", "ssh -N -F none .*-L \(config.forwardSpec) "])
-        if config.isComplete { tunnel.start(config) }
+        if config.isComplete {
+            tunnel.start(config)
+            if let e = await applySystemSettings() { message = e }
+        }
         try? await Task.sleep(nanoseconds: 2_500_000_000)
         refresh()
     }
 
     func apply(_ c: Config) {
-        let wasTunnel = (mode == "tunnel")
         config = c
         do { try c.save() } catch { message = "Настройки не сохранились: \(error.localizedDescription)" }
-        Task {
-            if wasTunnel, let e = await applyTunnelMode() { message = e }
-            await startServices()
-        }
+        Task { await startServices() }
     }
 
-    // MARK: режимы
+    // MARK: системные настройки: прокси для Claude Code и PAC
 
     private func pacState() async -> (String, Bool) {
         let (_, out) = await run(["/usr/sbin/networksetup", "-getautoproxyurl", config.networkService])
@@ -181,44 +175,35 @@ final class Model: ObservableObject {
         return (url, on)
     }
 
-    private func detectMode() async {
-        let cc = ClaudeSettings.proxy()
+    private func detectApplied() async {
         let (url, on) = await pacState()
-        if cc == config.proxyURL && on && url == config.pacURL { mode = "tunnel" }
-        else if cc == nil && !on { mode = "vpn" }
-        else { mode = "mixed" }
-        // Ненастроенный туннель: вкладку выбирает пользователь (на «Туннеле» — настройка), режим остаётся VPN.
-        if config.isComplete || mode != "vpn" { tab = mode == "vpn" ? "vpn" : "tunnel" }
+        applied = ClaudeSettings.proxy() == config.proxyURL && on && url == config.pacURL
     }
 
-    private func applyTunnelMode() async -> String? {
+    /// Включает прокси для Claude Code и PAC, если они ещё не включены (или их сбросили).
+    private func applySystemSettings() async -> String? {
+        await detectApplied()
+        guard !applied else { return nil }
         do { try ClaudeSettings.set(proxy: config.proxyURL, host: config.hostTrimmed) }
         catch { return error.localizedDescription }
         let a = await run(["/usr/sbin/networksetup", "-setautoproxyurl", config.networkService, config.pacURL])
         let b = await run(["/usr/sbin/networksetup", "-setautoproxystate", config.networkService, "on"])
         if a.0 != 0 || b.0 != 0 { return "Не удалось включить PAC: " + (a.1 + b.1).trimmingCharacters(in: .whitespacesAndNewlines) }
+        applied = true
+        message = "Туннель включён для Claude. Перезапустите Claude, если он был открыт."
         return nil
     }
 
-    private func applyVPNMode() async -> String? {
-        do { try ClaudeSettings.set(proxy: nil, host: config.hostTrimmed) }
-        catch { return error.localizedDescription }
-        let b = await run(["/usr/sbin/networksetup", "-setautoproxystate", config.networkService, "off"])
-        if b.0 != 0 { return "Не удалось выключить PAC: " + b.1.trimmingCharacters(in: .whitespacesAndNewlines) }
-        return nil
-    }
-
-    func setMode(_ target: String) {
-        guard target != mode, !busy else { return }
-        if target == "tunnel" && !config.isComplete { return }   // вкладка «Туннель» покажет настройку
-        busy = true
-        message = ""
-        Task {
-            let err = target == "tunnel" ? await applyTunnelMode() : await applyVPNMode()
-            busy = false
-            message = err ?? "Перезапустите программы, которые ходят через туннель (например, Claude), чтобы они подхватили режим."
-            refresh()
-        }
+    /// При выходе из приложения: снять прокси и PAC, чтобы без туннеля ничего не осталось направленным в него.
+    /// Синхронно — приложение уже закрывается.
+    func removeSystemSettingsSync() {
+        guard applied || ClaudeSettings.proxy() == config.proxyURL else { return }
+        try? ClaudeSettings.set(proxy: nil, host: config.hostTrimmed)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
+        p.arguments = ["-setautoproxystate", config.networkService, "off"]
+        try? p.run()
+        p.waitUntilExit()
     }
 
     func reconnect() {
@@ -235,16 +220,13 @@ final class Model: ObservableObject {
     /// quiet — фоновая проверка: окошко не мигает, результат появляется целиком в конце.
     func refresh(quiet: Bool = false) {
         guard !busy else { return }
+        guard config.isComplete else { steps = []; verdictOK = false; return }
         busy = true
         self.quiet = quiet
         if !quiet { checking = true }
         Task {
-            await detectMode()
-            if !config.isComplete || mode == "vpn" {
-                await checkVPN()   // туннеля нет или он выключен — Claude ходит через VPN, его и проверяем
-            } else {
-                await checkTunnel()
-            }
+            if let e = await applySystemSettings() { message = e }
+            await checkTunnel()
             steps = work
             checkedAt = Date()
             checking = false
@@ -271,19 +253,14 @@ final class Model: ObservableObject {
         if !quiet { try? await Task.sleep(nanoseconds: 150_000_000) }
 
         let port = await run(["/usr/bin/nc", "-z", "-w", "2", "127.0.0.1", String(config.localPort)]).0 == 0
-        let t1: String
+        var t1: String
         if !tunnel.running { t1 = tunnel.lastError.isEmpty ? "ssh не запущен" : tunnel.lastError }
         else if !port { t1 = "порт \(config.localPort) не отвечает" }
-        else { t1 = "" }
+        else { t1 = await tunnelRoute() }
         await step(0, tunnel.running && port, t1)
 
-        let (_, trace) = await run(["/usr/bin/curl", "-s", "-x", config.proxyURL, "--max-time", "10",
-                                    "https://claude.ai/cdn-cgi/trace"])
-        var ip = "", loc = ""
-        for line in trace.split(separator: "\n") {
-            if line.hasPrefix("ip=") { ip = String(line.dropFirst(3)) }
-            if line.hasPrefix("loc=") { loc = String(line.dropFirst(4)) }
-        }
+        // Доказательство для всего, что идёт через прокси: claude.ai видит адрес сервера, а не VPN и не Россию.
+        let (ip, loc) = await traceViaTunnel()
         let host = config.hostTrimmed
         let expected = await Task.detached { resolveIPv4(host) }.value
         let ipOK = !ip.isEmpty && loc != "RU" && (expected == nil || ip == expected)
@@ -291,29 +268,34 @@ final class Model: ObservableObject {
         if !ip.isEmpty && !ipOK, let e = expected { t2 += " — ожидался \(e)" }
         await step(1, ipOK, t2)
 
-        let (url, on) = await pacState()
-        await step(2, on && url == config.pacURL, on ? (url == config.pacURL ? "" : "другой PAC: \(url)") : "выключен")
+        // Claude Code берёт прокси из своих настроек — VPN на это не влияет.
+        let cc = ClaudeSettings.proxy()
+        await step(2, cc == config.proxyURL, cc == config.proxyURL ? "прокси в ~/.claude/settings.json" : "прокси не задан — Claude Code пойдёт мимо туннеля")
 
+        // Браузер и приложение Claude берут прокси из системы. Смотрим не настройку Wi-Fi, а то, что система
+        // применяет на самом деле: VPN-клиент в режиме TUN становится основным интерфейсом, и PAC Wi-Fi игнорируется.
+        let (_, eff) = await run(["/usr/sbin/scutil", "--proxy"])
+        func flag(_ k: String) -> Bool { eff.contains("\(k) : 1") }
+        let pacOn = flag("ProxyAutoConfigEnable") && eff.contains("ProxyAutoConfigURLString : \(config.pacURL)")
+        let manual = flag("HTTPEnable") || flag("HTTPSEnable") || flag("SOCKSEnable")
         let (_, pacBody) = await run(["/usr/bin/curl", "-s", "--noproxy", "*", "--max-time", "3", config.pacURL])
         let served = pacBody.contains("PROXY 127.0.0.1:\(config.localPort)")
-        await step(3, served, served ? "" : (pac.error.isEmpty ? "не отвечает — браузер пойдёт напрямую" : pac.error))
+        let viaVPN = await defaultRouteIsVPN()
+        let t4: String
+        if !pacOn {
+            t4 = viaVPN
+                ? "Включён VPN, и система не применяет PAC: браузер и приложение Claude идут через VPN, а не через туннель. Выключите VPN — Claude Code при этом и так идёт через туннель."
+                : "Система не применяет PAC (служба «\(config.networkService)» — та, что в «Дополнительно»?)"
+        } else if manual {
+            t4 = "В системе включён ещё и обычный прокси (VPN-клиент?) — браузер может пойти через него"
+        } else if !served {
+            t4 = pac.error.isEmpty ? "PAC не раздаётся — эти сайты не откроются" : pac.error
+        } else {
+            t4 = "через PAC; остальные сайты — напрямую"
+        }
+        await step(3, pacOn && !manual && served, t4)
 
-        let cc = ClaudeSettings.proxy()
-        await step(4, cc == config.proxyURL, cc == config.proxyURL ? "" : "не задан — Claude Code пойдёт напрямую")
-
-        verdictOK = mode == "tunnel" && work.allSatisfy { $0.state == .ok }
-    }
-
-    private func checkVPN() async {
-        work = makeSteps(["VPN подключён"])
-        work[0].state = .running
-        publish()
-        let (_, out) = await run(["/bin/bash", "-c",
-            "curl -s --noproxy '*' --max-time 5 https://claude.ai/cdn-cgi/trace | sed -n 's/^loc=//p'"])
-        directLoc = out.trimmingCharacters(in: .whitespacesAndNewlines)
-        let ok = !directLoc.isEmpty && directLoc != "RU"
-        await step(0, ok, ok ? "выход: \(directLoc)" : "claude.ai не отвечает — включите VPN")
-        verdictOK = ok
+        verdictOK = work.allSatisfy { $0.state == .ok }
     }
 
     // MARK: настройка сервера из приложения
@@ -552,6 +534,29 @@ final class Model: ObservableObject {
         }
     }
 
+    /// Через какой интерфейс идёт само ssh-соединение туннеля: напрямую (интерфейс из настроек) или через VPN.
+    private func tunnelRoute() async -> String {
+        let (_, out) = await run(["/usr/sbin/lsof", "-nP", "-a", "-c", "ssh",
+                                  "-iTCP@\(config.hostTrimmed):\(config.sshPort)", "-sTCP:ESTABLISHED", "-F", "n"])
+        guard let line = out.split(separator: "\n").first(where: { $0.hasPrefix("n") && $0.contains("->") }),
+              let local = line.dropFirst().split(separator: "->").first?.split(separator: ":").first.map(String.init)
+        else { return "" }
+        let iface = config.interface.trimmingCharacters(in: .whitespaces)
+        guard !iface.isEmpty else { return "с адреса \(local)" }
+        let (_, ifIP) = await run(["/usr/sbin/ipconfig", "getifaddr", iface])
+        return ifIP.trimmingCharacters(in: .whitespacesAndNewlines) == local
+            ? "напрямую через \(iface), мимо VPN"
+            : "с адреса \(local), не через \(iface) — возможно, через VPN"
+    }
+
+    /// Основной маршрут — через VPN (utun/ppp/ipsec)?
+    private func defaultRouteIsVPN() async -> Bool {
+        let (_, out) = await run(["/sbin/route", "-n", "get", "default"])
+        guard let l = out.split(separator: "\n").first(where: { $0.contains("interface:") }) else { return false }
+        let i = l.split(separator: ":").last?.trimmingCharacters(in: .whitespaces) ?? ""
+        return i.hasPrefix("utun") || i.hasPrefix("ppp") || i.hasPrefix("ipsec")
+    }
+
     func traceViaTunnel() async -> (String, String) {
         let (_, trace) = await run(["/usr/bin/curl", "-s", "-x", config.proxyURL, "--max-time", "8",
                                     "https://claude.ai/cdn-cgi/trace"])
@@ -565,12 +570,48 @@ final class Model: ObservableObject {
 
     // MARK: ключ и прочее
 
+    /// Имя этого Мака для комментария ключа: на сервере видно, чей ключ («proxy-tunnel@MacBook-Anton»).
+    static var machineName: String {
+        let h = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        let clean = h.replacingOccurrences(of: ".local", with: "")
+            .map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? String($0) : "-" }.joined()
+        return clean.isEmpty ? "mac" : clean
+    }
+
+    /// Ключ по этому пути готов к работе: есть годный закрытый ключ без пароля и его .pub.
+    /// Годный уже лежит — используется он (повторная настройка не плодит ключи). Под этим именем лежит что-то
+    /// негодное (не ключ, ключ с паролем) или только .pub — это откладывается в «<имя>.old-<время>», не удаляясь,
+    /// и создаётся новый ключ. Ключи пользователя в ~/.ssh приложение не трогает: его ключи — в своей папке.
     func generateKey(at path: String, comment: String = "proxy-tunnel") async -> String? {
-        guard !FileManager.default.fileExists(atPath: path) else { return nil }
-        try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
-                                                 withIntermediateDirectories: true)
-        let (code, out) = await run(["/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", comment,
-                                     "-f", path])
+        let fm = FileManager.default
+        let label = "\(comment)@\(Model.machineName)"
+        try? fm.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        func moveAside(_ p: String) {
+            guard fm.fileExists(atPath: p) else { return }
+            try? fm.moveItem(atPath: p, toPath: "\(p).old-\(stamp)")
+            Log.append("ключ \(p) не годится — отложен как \(p).old-\(stamp)")
+        }
+        if fm.fileExists(atPath: path) {
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)   // ssh-keygen не читает ключ с открытыми правами
+            let (code, out) = await run(["/usr/bin/ssh-keygen", "-y", "-P", "", "-f", path])
+            let pub = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if code == 0, pub.hasPrefix("ssh-") || pub.hasPrefix("ecdsa-") {
+                // .pub нет или он от другого ключа — восстановить из закрытого
+                let body = pub.split(separator: " ").prefix(2).joined(separator: " ")
+                let existing = (try? String(contentsOfFile: path + ".pub")) ?? ""
+                if !existing.hasPrefix(body) {
+                    moveAside(path + ".pub")
+                    try? (body + " " + label + "\n").write(toFile: path + ".pub", atomically: true, encoding: .utf8)
+                }
+                return nil
+            }
+            moveAside(path)
+            moveAside(path + ".pub")
+        } else {
+            moveAside(path + ".pub")   // .pub без закрытого ключа: ssh-keygen спросил бы «перезаписать?» и встал
+        }
+        let (code, out) = await run(["/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", label, "-f", path])
         return code == 0 ? nil : out
     }
 

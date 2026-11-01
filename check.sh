@@ -31,17 +31,21 @@ else
   fail "claude.ai через туннель видит «${ip:-нет ответа}» «${loc}» — ожидалось ${EXPECT_IP:-адрес из настроек}, не RU"
 fi
 
-echo "Браузер и приложение Claude (PAC):"
-pac=$(networksetup -getautoproxyurl "$SVC" 2>/dev/null)
-if echo "$pac" | grep -q "127.0.0.1:$PACP/proxy.pac" && echo "$pac" | grep -q "Enabled: Yes"; then
-  ok "PAC включён для $SVC"
+echo "Браузер и приложение Claude:"
+# Не настройка Wi-Fi, а то, что система применяет на самом деле: VPN в режиме TUN её перекрывает.
+eff=$(scutil --proxy)
+if echo "$eff" | grep -q "ProxyAutoConfigEnable : 1" && echo "$eff" | grep -q "ProxyAutoConfigURLString : http://127.0.0.1:$PACP/proxy.pac"; then
+  ok "система применяет PAC туннеля"
 else
-  fail "PAC для $SVC не включён"
+  iface=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
+  case "$iface" in utun*|ppp*|ipsec*) fail "включён VPN ($iface), система не применяет PAC — браузер и приложение Claude идут через VPN";;
+    *) fail "система не применяет PAC (служба $SVC)";; esac
 fi
+if echo "$eff" | grep -Eq "(HTTP|HTTPS|SOCKS)Enable : 1"; then fail "в системе включён ещё и обычный прокси — браузер может пойти через него"; fi
 if curl -s --noproxy '*' --max-time 3 "http://127.0.0.1:$PACP/proxy.pac" | grep -q "PROXY 127.0.0.1:$LOCAL"; then
   ok "PAC-файл раздаётся"
 else
-  fail "PAC-файл не раздаётся — браузер пойдёт к claude.ai напрямую"
+  fail "PAC-файл не раздаётся — эти сайты не откроются"
 fi
 
 echo "Claude Code:"

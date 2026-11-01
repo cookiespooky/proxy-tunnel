@@ -1,9 +1,9 @@
 #!/bin/bash
-# Переключает, как Claude выходит в интернет, — то же, что переключатель в окошке Proxy Tunnel.
-#   mode.sh tunnel — через свой SSH-туннель (VPN не нужен)
-#   mode.sh vpn    — без туннеля: через любой включённый VPN; старое имя happ тоже работает
-#   mode.sh        — показать текущий режим
-# Трогает только env.HTTPS_PROXY и env.NO_PROXY в ~/.claude/settings.json и PAC сетевой службы.
+# Включает и снимает прокси туннеля для Claude Code и браузера — то же, что делает приложение
+# (само включает, когда сервер настроен, и снимает при выходе). Нужен, если приложение закрыли аварийно.
+#   mode.sh on   — прокси в ~/.claude/settings.json и PAC для сетевой службы
+#   mode.sh off  — снять и то и другое
+#   mode.sh      — показать, включено ли
 # Сервер, порты и службу берёт из настроек приложения.
 set -e
 S="$HOME/.claude/settings.json"
@@ -18,7 +18,7 @@ PROXY="http://127.0.0.1:$LOCAL"
 PAC_URL="http://127.0.0.1:$PACP/proxy.pac"
 
 set_env() {  # $1 = on | off
-  python3 - "$S" "$1" "$PROXY" "$HOST" <<'EOF'
+  python3 - "$S" "$1" "$PROXY" "$HOST" <<'PY'
 import json, os, sys, shutil
 p, mode, proxy, host = sys.argv[1:5]
 d = json.load(open(p)) if os.path.exists(p) else {}
@@ -34,35 +34,27 @@ if env: d["env"] = env
 else: d.pop("env", None)
 os.makedirs(os.path.dirname(p), exist_ok=True)
 json.dump(d, open(p, "w"), ensure_ascii=False, indent=2); open(p, "a").write("\n")
-EOF
-}
-
-current() {
-  cc=$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.claude/settings.json"))).get("env",{}).get("HTTPS_PROXY",""))' 2>/dev/null)
-  pac=$(networksetup -getautoproxyurl "$SVC" | grep -c "Enabled: Yes" || true)
-  if [ -n "$cc" ] && [ "$pac" = 1 ]; then echo "tunnel"
-  elif [ -z "$cc" ] && [ "$pac" = 0 ]; then echo "vpn"
-  else echo "смешанный (Claude Code: ${cc:-без прокси}, PAC: $([ "$pac" = 1 ] && echo вкл || echo выкл)) — выполните mode.sh tunnel или mode.sh vpn"; fi
+PY
 }
 
 case "$1" in
-  tunnel)
+  on)
     [ -n "$HOST" ] || { echo "В настройках приложения не указан сервер."; exit 2; }
     set_env on
     networksetup -setautoproxyurl "$SVC" "$PAC_URL"
     networksetup -setautoproxystate "$SVC" on
-    echo "Режим: туннель. Перезапустите Claude Code и приложение Claude, затем:"
-    echo "  bash $(cd "$(dirname "$0")" && pwd)/check.sh"
+    echo "Включено. Перезапустите Claude Code и приложение Claude, затем: bash $(cd "$(dirname "$0")" && pwd)/check.sh"
     ;;
-  happ|vpn)
+  off)
     set_env off
     networksetup -setautoproxystate "$SVC" off
-    echo "Режим: VPN. Включите VPN-клиент, перезапустите Claude Code и приложение Claude."
-    echo "Выход сейчас: $(curl -s --noproxy '*' --max-time 8 https://claude.ai/cdn-cgi/trace | sed -n 's/^loc=//p' | sed 's/^$/нет ответа/') (пусто или RU — VPN выключен, Claude не откроется)"
+    echo "Снято. Claude Code и браузер ходят напрямую."
     ;;
   "")
-    echo "Режим: $(current)"
+    cc=$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.claude/settings.json"))).get("env",{}).get("HTTPS_PROXY",""))' 2>/dev/null)
+    pac=$(networksetup -getautoproxyurl "$SVC" | grep -c "Enabled: Yes" || true)
+    echo "Claude Code: ${cc:-без прокси}; PAC для $SVC: $([ "$pac" = 1 ] && echo вкл || echo выкл)"
     ;;
   *)
-    echo "mode.sh tunnel | vpn"; exit 2 ;;
+    echo "mode.sh on | off"; exit 2 ;;
 esac

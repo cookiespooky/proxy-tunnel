@@ -42,21 +42,16 @@ struct StatusCard: View {
 
     private var status: (title: String, subtitle: String, icon: String, color: Color) {
         if m.checking { return ("Проверяю…", "", "", .secondary) }
-        switch m.mode {
-        case "tunnel":
-            if m.verdictOK {
-                let where_ = m.steps.count > 1 ? m.steps[1].detail : ""
-                return ("Соединение через туннель", where_.isEmpty ? "" : "выход: \(where_)",
-                        "checkmark.shield.fill", Palette.green)
-            }
-            return ("Соединение не готово", "Исправьте отмеченное ниже", "xmark.shield.fill", Palette.red)
-        case "vpn":
-            return m.verdictOK
-                ? ("Соединение через VPN", "выход: \(m.directLoc)", "globe", Palette.blue)
-                : ("VPN не подключён", "Соединение не установится", "wifi.exclamationmark", Palette.orange)
-        default:
-            return ("Режим выбран не до конца", "Выберите «Туннель» или «VPN»", "exclamationmark.triangle.fill", Palette.orange)
+        if m.verdictOK {
+            let where_ = m.steps.count > 1 ? m.steps[1].detail : ""
+            return ("Соединение через туннель", where_.isEmpty ? "" : "выход: \(where_)", "checkmark.shield.fill", Palette.green)
         }
+        if m.steps.isEmpty { return ("Подключаюсь…", "", "hourglass", .secondary) }
+        if m.steps.count == 4, m.steps[0..<3].allSatisfy({ $0.state == .ok }), m.steps[3].state == .fail {
+            return ("Claude Code — через туннель", "Браузер и приложение Claude — нет, см. ниже",
+                    "exclamationmark.shield.fill", Palette.orange)
+        }
+        return ("Соединение не готово", "Исправьте отмеченное ниже", "xmark.shield.fill", Palette.red)
     }
 }
 
@@ -93,7 +88,7 @@ struct StepRow: View {
     }
 }
 
-/// Вкладка «Туннель», пока он не настроен: что это и как настроить. Режим при этом остаётся VPN.
+/// Пока туннель не настроен: что это и как настроить.
 struct TunnelSetupCard: View {
     @ObservedObject var m: Model
 
@@ -107,7 +102,7 @@ struct TunnelSetupCard: View {
                 }
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Туннель не настроен").font(.system(size: 14, weight: .semibold))
-                    Text("Свой сервер за границей: через него идут только Claude и выбранные сайты, остальное — напрямую. VPN не нужен. Пока туннель не настроен, работает VPN.")
+                    Text("Свой сервер за границей: через него идут только Claude и выбранные сайты, остальное — напрямую.")
                         .font(.system(size: 12)).foregroundColor(Palette.sub)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -151,18 +146,7 @@ struct PanelView: View {
                 .font(.system(size: 15))
             }
 
-            Picker("", selection: Binding(
-                get: { m.tab },
-                set: { t in m.tab = t; m.setMode(t) }   // ненастроенный туннель: только вкладка, режим не меняется
-            )) {
-                Text("Туннель").tag("tunnel")
-                Text("VPN").tag("vpn")
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .disabled(m.busy)
-
-            if m.tab == "tunnel" && !m.config.isComplete {
+            if !m.config.isComplete {
                 TunnelSetupCard(m: m)
             } else {
                 StatusCard(m: m)
@@ -174,11 +158,6 @@ struct PanelView: View {
                     }
                 }
                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.card))
-
-                if !m.config.isComplete {
-                    Text("Свой туннель не настроен — вкладка «Туннель».")
-                        .font(.system(size: 12)).foregroundColor(Palette.sub)
-                }
             }
 
             if !m.message.isEmpty {
@@ -302,7 +281,7 @@ struct SettingsView: View {
                     Text("Выйти из Proxy Tunnel").foregroundColor(Palette.red).frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderless)
-                Text("Туннель и PAC закроются. В режиме «Туннель» соединение пропадёт.")
+                Text("Туннель закроется, прокси для Claude и браузера снимутся.")
                     .font(.caption).foregroundColor(.secondary).frame(maxWidth: .infinity)
             }
         }
@@ -397,13 +376,8 @@ struct SettingsView: View {
         if !m.setupSteps.isEmpty {
             VStack(spacing: 0) { ForEach(m.setupSteps) { StepRow(step: $0) } }
             if m.setupDone {
-                if m.mode == "tunnel" {
-                    Text("Готово. Туннель включён — перезапустите Claude, если он открыт.")
-                        .font(.caption).foregroundColor(Palette.green)
-                } else {
-                    Button("Включить туннель для Claude") { m.setMode("tunnel") }
-                        .buttonStyle(.borderedProminent)
-                }
+                Text("Готово. Туннель включён — перезапустите Claude, если он был открыт.")
+                    .font(.caption).foregroundColor(Palette.green)
             }
         }
     }
@@ -531,6 +505,7 @@ struct SettingsView: View {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
+        Model.current?.removeSystemSettingsSync()
         Model.current?.tunnel.stop()
         Model.current?.pac.stop()
     }
