@@ -35,10 +35,10 @@ public sealed class Core
     bool announceOn;
 
     // новая версия: что сказал сервер обновлений; новее установленной — строка «Доступна версия…» в панели
-    public string LatestVersion = Update.KnownLatest;
+    public string LatestVersion = AppUpdate.KnownLatest;
     DateTime pingFailedAt = DateTime.MinValue;
     public string? UpdateAvailable =>
-        LatestVersion.Length > 0 && Update.IsNewer(LatestVersion, Update.Version) ? LatestVersion : null;
+        LatestVersion.Length > 0 && AppUpdate.IsNewer(LatestVersion, AppUpdate.Version) ? LatestVersion : null;
 
     // настройка сервера
     public AccessState Access = AccessState.Idle;
@@ -72,9 +72,9 @@ public sealed class Core
     public async void MaybePing()
     {
         var on = Enabled && VerdictOK;
-        if (!Update.Due(on) || DateTime.Now - pingFailedAt < TimeSpan.FromMinutes(30)) return;
+        if (!AppUpdate.Due(on) || DateTime.Now - pingFailedAt < TimeSpan.FromMinutes(30)) return;
         pingFailedAt = DateTime.Now;           // и защита от второго запроса, пока идёт первый
-        var v = await Update.Ping(on);
+        var v = await AppUpdate.Ping(on);
         if (v == null) return;
         pingFailedAt = DateTime.MinValue;
         LatestVersion = v;

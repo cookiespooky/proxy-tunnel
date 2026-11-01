@@ -86,7 +86,7 @@ Claude Code ── HTTPS_PROXY ─┐
 - Сервер не хранит IP (nginx `access_log off`, отказы по частоте ниже уровня журнала), хранит по номеру: день
   первого запроса, систему, версию и дни запросов за последние 35 дней. Номер последней версии сервер берёт у
   GitHub (`releases/latest`, раз в час). Код сервера — не в этом репозитории.
-- Файлы: `menubar/Update.swift`, `windows/Update.cs`.
+- Файлы: `menubar/Update.swift`, `windows/Update.cs` (класс `AppUpdate`: внутри окон WinForms имя `Update` занято методом `Control.Update`).
 
 Выпуск новой версии: поднять номер в `menubar/build.sh` (`CFBundleShortVersionString`) и
 `windows/ProxyTunnel.csproj` (`Version`), собрать `menubar/package.sh`, взять `ProxyTunnel-windows.exe` из

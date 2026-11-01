@@ -7,7 +7,7 @@ using Microsoft.Win32;
 
 namespace ProxyTunnel;
 
-public static class Update
+public static class AppUpdate
 {
     const string Endpoint = "https://stats.antonlozhkin.ru/pt/ping";
     public const string DownloadUrl = "https://github.com/cookiespooky/proxy-tunnel/releases/latest/download/ProxyTunnel-windows.exe";

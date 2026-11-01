@@ -297,7 +297,7 @@ sealed class StatusForm : Form
             var upd = Ui.L($"Доступна версия {nv}", Palette.Bold, Palette.Blue);
             upd.Margin = new Padding(0, 8, 8, 2);
             var dl = new LinkLabel { Text = "Скачать", AutoSize = true, Font = Palette.Text, Margin = new Padding(0, 9, 0, 2) };
-            dl.LinkClicked += (_, _) => Ui.Open(Update.DownloadUrl);
+            dl.LinkClicked += (_, _) => Ui.Open(AppUpdate.DownloadUrl);
             body.Controls.Add(Ui.Row(upd, dl));
         }
 
@@ -489,7 +489,7 @@ sealed class SettingsForm : Form
         autostart.CheckedChanged += (_, _) => { if (!loaded) return; try { Autostart.On = autostart.Checked; } catch (Exception e) { note.Text = "Автозапуск: " + e.Message; } };
         root.Controls.Add(autostart);
         sendStats.Margin = new Padding(0, 4, 0, 2);
-        sendStats.CheckedChanged += (_, _) => { if (loaded) Update.SendStats = sendStats.Checked; };
+        sendStats.CheckedChanged += (_, _) => { if (loaded) AppUpdate.SendStats = sendStats.Checked; };
         root.Controls.Add(sendStats);
         root.Controls.Add(Ui.L("Раз в день программа узнаёт, нет ли новой версии. Со статистикой она сообщает ещё случайный номер установки, версию, систему и включали ли сегодня туннель — чтобы автор видел, сколькими людьми программа пользуется. Адрес сервера, список сайтов и IP не сохраняются.", Palette.Small, Palette.Sub, W));
 
@@ -565,7 +565,7 @@ sealed class SettingsForm : Form
         pacPort.Value = Math.Clamp(c.PacPort, 1, 65535);
         domains.Lines = c.Domains.ToArray();
         try { autostart.Checked = Autostart.On; } catch { }
-        sendStats.Checked = Update.SendStats;
+        sendStats.Checked = AppUpdate.SendStats;
         note.Text = "";
         loaded = true;
         Sync();
