@@ -111,6 +111,8 @@ IP-адреса не сохраняются. Выключить — галочк
 - [Proxy Tunnel для Mac](https://github.com/cookiespooky/proxy-tunnel/releases/latest/download/ProxyTunnel-mac.dmg)
 - [Proxy Tunnel для Windows](https://github.com/cookiespooky/proxy-tunnel/releases/latest/download/ProxyTunnel-windows.exe)
 
+Ссылки ведут на последнюю версию. Что нового в каждой — на странице [выпусков](https://github.com/cookiespooky/proxy-tunnel/releases).
+
 ---
 
 Proxy Tunnel — инструмент лаборатории [Life OS](https://lifeos.antonlozhkin.ru/).
