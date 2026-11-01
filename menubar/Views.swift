@@ -412,7 +412,7 @@ struct SettingsView: View {
             LabeledContent("Вход по ключу") {
                 switch m.keyStable {
                 case .none: Text("не проверен").foregroundColor(.secondary)
-                case .some(true): Text(m.keyVerifiedBySetup ? "работает (проверено при настройке)" : "стабилен, 3 из 3")
+                case .some(true): Text(m.keyCheckedHow.isEmpty ? "стабилен, 3 из 3" : "работает (\(m.keyCheckedHow))")
                     .foregroundColor(Palette.green)
                 case .some(false): Text("не прошёл").foregroundColor(Palette.red)
                 }

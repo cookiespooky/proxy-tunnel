@@ -406,7 +406,9 @@ final class Model: ObservableObject {
     /// Сервер именно не принял ключ (а не отклонил подключение) — тогда предлагаем создать ключ.
     @Published var keyDenied = false
     /// Вход по ключу известен по настройке (одна проверка), а не по кнопке «Проверить соединение» (три подряд).
-    @Published var keyVerifiedBySetup = false
+    /// Как проверен вход по ключу, если не кнопкой «Проверить соединение» (три подряд):
+    /// «проверено при настройке», «проверено при открытии настроек». Пусто — кнопкой, «стабилен, 3 из 3».
+    @Published var keyCheckedHow = ""
     private var adminIsRoot = true
 
     func probeAccess(_ c: Config) async {
@@ -415,9 +417,27 @@ final class Model: ObservableObject {
         guard !c.hostTrimmed.isEmpty else { access = .idle; return }
         access = .checking
         await Net.prepare(c.hostTrimmed, interface: c.effectiveInterface)
-        let r = await ServerSetup.probe(c, admin: c.adminTrimmed, auth: c.adminAuth)
+        // shared: удачный вход остаётся общим соединением — состояние входа по паролю читается через него,
+        // без второго подключения (на сервере может быть ограничение частоты).
+        let r = await ServerSetup.probe(c, admin: c.adminTrimmed, auth: c.adminAuth, shared: true)
         guard gen == probeGen else { return }   // адрес успели поменять
         access = Model.access(from: r, admin: c.adminTrimmed)
+
+        // Это настроенный сервер — тот же результат идёт в «Доступ к серверу».
+        guard c.hostTrimmed == config.hostTrimmed, c.adminTrimmed == config.adminTrimmed, !accessBusy else { return }
+        if r.canAdmin {
+            adminIsRoot = r == .root
+            if !(keyStable == true && keyCheckedHow.isEmpty) {   // «3 из 3» от кнопки не затираем
+                keyStable = true
+                keyCheckedHow = "проверено при открытии настроек"
+            }
+            keyDenied = false
+            if let p = await ServerSetup.passwordEnabled(c, admin: c.adminTrimmed, root: adminIsRoot) { passwordLogin = p }
+        } else if r == .denied {
+            keyStable = false
+            keyCheckedHow = ""
+            keyDenied = true
+        }
     }
 
     private static func access(from r: ProbeResult, admin: String) -> Access {
@@ -547,7 +567,7 @@ final class Model: ObservableObject {
         let keyWorks = !byPassword || (wantAdminKey && setupSteps[3].state == .ok)
         access = keyWorks ? .key(root: adminIsRoot) : .needPassword
         keyStable = keyWorks
-        keyVerifiedBySetup = keyWorks
+        keyCheckedHow = keyWorks ? "проверено при настройке" : ""
         keyDenied = false
         passwordLogin = byPassword ? true : passwordOn
         accessNote = keyWorks ? "Вход по ключу проверен при настройке." : ""
@@ -584,7 +604,7 @@ final class Model: ObservableObject {
         defer { accessBusy = false }
         keyStable = nil
         keyDenied = false
-        keyVerifiedBySetup = false
+        keyCheckedHow = ""
         let c = config, admin = c.adminTrimmed
         await Net.prepare(c.hostTrimmed, interface: c.effectiveInterface)
         var ok = 0
