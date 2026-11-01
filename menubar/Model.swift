@@ -326,6 +326,8 @@ final class Model: ObservableObject {
     @Published var setupDone = false
     /// Ключ не подошёл — нужен пароль (окно настроек показывает поле и переключает вкладку).
     @Published var setupNeedsPassword = false
+    /// Вошли по паролю — после настройки напомнить, что вход по паролю на сервере остался включён.
+    @Published var setupByPassword = false
 
     private func setupStep(_ i: Int, _ ok: Bool, _ detail: String = "") {
         setupSteps[i].state = ok ? .ok : .fail
@@ -364,6 +366,7 @@ final class Model: ObservableObject {
             probe = await ServerSetup.probe(c, admin: admin, auth: auth)
             how = "по паролю"
         }
+        setupByPassword = (how == "по паролю")
         switch probe {
         case .root: setupStep(1, true, "\(admin) \(how)")
         case .sudo: setupStep(1, true, "\(admin) \(how), через sudo")

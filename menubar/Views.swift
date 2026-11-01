@@ -134,6 +134,13 @@ struct PanelView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                if m.config.hostTrimmed.isEmpty {
+                    Link(destination: Config.rentServerURL) {
+                        Text("Нет сервера? Арендовать").frame(maxWidth: .infinity)
+                    }
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(Palette.blue)
+                }
             }
 
             VStack(spacing: 0) {
@@ -187,6 +194,15 @@ struct SettingsView: View {
             Section {
                 TextField("Адрес сервера", text: $draft.host, prompt: Text("IP или домен"))
                 TextField("SSH-порт", value: $draft.sshPort, format: plainInt)
+                if m.config.hostTrimmed.isEmpty {
+                    HStack {
+                        Text("Нет сервера? Подойдёт любой зарубежный VPS на Ubuntu или Debian.")
+                            .font(.caption).foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Link("Арендовать сервер", destination: Config.rentServerURL)
+                    }
+                }
             } header: { StepHeader(n: 1, title: "Сервер", done: m.config.isComplete) }
 
             Section {
@@ -215,6 +231,11 @@ struct SettingsView: View {
                         } else {
                             Button("Включить туннель для Claude") { m.setMode("tunnel") }
                                 .buttonStyle(.borderedProminent)
+                        }
+                        if m.setupByPassword {
+                            Text("Вход на сервер по паролю остался включённым — туннелю он не нужен. Если не пользуетесь им сами, отключите его (PasswordAuthentication no в настройках ssh сервера) или хотя бы задайте длинный пароль.")
+                                .font(.caption).foregroundColor(Palette.orange)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
