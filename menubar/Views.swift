@@ -57,11 +57,11 @@ struct StatusCard: View {
         if m.checking { return ("Проверяю…", "", "", .secondary) }
         if m.verdictOK {
             let where_ = m.steps.count > 1 ? m.steps[1].detail : ""
-            return ("Соединение через туннель", where_.isEmpty ? "" : "выход: \(where_)", "checkmark.shield.fill", Palette.green)
+            return ("Claude — через туннель", where_.isEmpty ? "" : "выход: \(where_)", "checkmark.shield.fill", Palette.green)
         }
         if m.steps.isEmpty { return ("Подключаюсь…", "", "hourglass", .secondary) }
         if m.steps.count == 4, m.steps[0..<3].allSatisfy({ $0.state == .ok }), m.steps[3].state == .fail {
-            return ("Claude Code — через туннель", "Браузер и приложение Claude — нет, см. ниже",
+            return ("Claude Code — через туннель", "Сайты из списка в браузере — нет, см. ниже",
                     "exclamationmark.shield.fill", Palette.orange)
         }
         return ("Соединение не готово", "Исправьте отмеченное ниже", "xmark.shield.fill", Palette.red)
@@ -260,7 +260,7 @@ struct SettingsView: View {
                 TextEditor(text: $domainsText)
                     .font(.system(.body, design: .monospaced))
                     .frame(height: 120)
-                Text("По одному домену в строке; поддомены включаются. Остальной трафик идёт напрямую.")
+                Text("В браузере и приложении Claude через туннель идут только эти сайты; остальные открываются напрямую, как без туннеля, — заблокированный сайт, которого нет в списке, не откроется. По одному домену в строке, поддомены включаются. Claude Code ходит через туннель целиком, кроме российских доменов.")
                     .font(.caption).foregroundColor(.secondary)
             }
 

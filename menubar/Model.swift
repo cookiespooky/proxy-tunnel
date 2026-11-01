@@ -97,7 +97,7 @@ enum ClaudeSettings {
     }
 }
 
-let tunnelSteps = ["Туннель подключён", "Выход через туннель", "Claude Code → туннель", "Браузер и приложение Claude → туннель"]
+let tunnelSteps = ["Туннель подключён", "Выход через туннель", "Claude Code → туннель", "Сайты из списка → туннель"]
 
 @MainActor
 final class Model: ObservableObject {
@@ -372,7 +372,10 @@ final class Model: ObservableObject {
         } else if !served {
             t4 = pac.error.isEmpty ? "PAC не раздаётся — эти сайты не откроются" : pac.error
         } else {
-            t4 = "через PAC; остальные сайты — напрямую"
+            // Не «весь браузер»: через туннель только сайты из списка, остальные — напрямую, без обхода блокировок.
+            let list = config.cleanDomains
+            let shown = list.prefix(3).joined(separator: ", ") + (list.count > 3 ? " и ещё \(list.count - 3)" : "")
+            t4 = "в браузере и приложении Claude: \(shown). Остальные сайты — напрямую, как без туннеля; добавить — Настройки → «Через туннель»"
         }
         await step(3, pacOn && !manual && served, t4)
 
