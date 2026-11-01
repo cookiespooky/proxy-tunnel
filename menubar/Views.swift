@@ -174,7 +174,7 @@ struct PanelView: View {
     }
 }
 
-enum SetupTab: String { case password, key, manual }
+enum SetupTab: String { case auto, manual }
 
 struct SettingsView: View {
     @ObservedObject var m: Model
@@ -182,10 +182,10 @@ struct SettingsView: View {
     @State private var domainsText = ""
     @State private var note = ""
     @State private var keyExists = false
-    @State private var tab = SetupTab.password
-    @State private var admin = "root"
+    @State private var tab = SetupTab.auto
     @State private var password = ""
-    @State private var adminKey: String?
+    @State private var makeAdminKey = true
+    @State private var accessPassword = ""
 
     private let plainInt = IntegerFormatStyle<Int>().grouping(.never)
 
@@ -207,39 +207,19 @@ struct SettingsView: View {
 
             Section {
                 Picker("", selection: $tab) {
-                    Text("Пароль").tag(SetupTab.password)
-                    Text("Ключ на сервере").tag(SetupTab.key)
+                    Text("Автоматически").tag(SetupTab.auto)
                     Text("Вручную").tag(SetupTab.manual)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
 
                 switch tab {
-                case .password: passwordTab
-                case .key: keyTab
+                case .auto: autoTab
                 case .manual: manualTab
                 }
-
-                if tab != .manual && !m.setupSteps.isEmpty {
-                    VStack(spacing: 0) {
-                        ForEach(m.setupSteps) { StepRow(step: $0) }
-                    }
-                    if m.setupDone {
-                        if m.mode == "tunnel" {
-                            Text("Готово. Туннель включён — перезапустите Claude, если он открыт.")
-                                .font(.caption).foregroundColor(Palette.green)
-                        } else {
-                            Button("Включить туннель для Claude") { m.setMode("tunnel") }
-                                .buttonStyle(.borderedProminent)
-                        }
-                        if m.setupByPassword {
-                            Text("Вход на сервер по паролю остался включённым — туннелю он не нужен. Если не пользуетесь им сами, отключите его (PasswordAuthentication no в настройках ssh сервера) или хотя бы задайте длинный пароль.")
-                                .font(.caption).foregroundColor(Palette.orange)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
             } header: { StepHeader(n: 2, title: "Настройка сервера (один раз)", done: m.setupDone) }
+
+            if m.config.isComplete { accessSection }
 
             Section("Через туннель") {
                 TextEditor(text: $domainsText)
@@ -298,34 +278,94 @@ struct SettingsView: View {
         .frame(width: 500)
         .onAppear { load() }
         .onReceive(NotificationCenter.default.publisher(for: SettingsWindow.shown)) { _ in load() }
-        .onChange(of: m.setupNeedsPassword) { need in if need { tab = .password } }
+        // Фоновая проверка входа по ключу: через секунду после того, как адрес, порт, логин или ключ перестали меняться.
+        .task(id: "\(draft.hostTrimmed)|\(draft.sshPort)|\(draft.adminTrimmed)|\(draft.adminKey)") {
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            guard !Task.isCancelled else { return }
+            await m.probeAccess(currentDraft())
+        }
     }
 
-    // MARK: вкладки
+    // MARK: настройка
 
-    private var hostEmpty: Bool { draft.hostTrimmed.isEmpty }
+    private var needPassword: Bool { m.access == .needPassword }
 
-    @ViewBuilder private var passwordTab: some View {
-        Text("Приложение само зайдёт на сервер (Ubuntu или Debian), поставит прокси и заведёт пользователя, которому разрешён только туннель. Если ваш SSH-ключ уже на сервере, пароль не понадобится. Пароль нигде не сохраняется.")
-            .font(.caption).fixedSize(horizontal: false, vertical: true)
-        TextField("Логин", text: $admin)
-        SecureField("Пароль", text: $password)
-        setupButton("Настроить сервер")
+    private var canSetup: Bool {
+        guard !draft.hostTrimmed.isEmpty, !m.setupBusy else { return false }
+        switch m.access {
+        case .key: return true
+        case .needPassword: return !password.isEmpty
+        default: return false
+        }
     }
 
-    @ViewBuilder private var keyTab: some View {
-        Text("Если при создании сервера вы добавили на него свой SSH-ключ: приложение войдёт по нему, без пароля.")
-            .font(.caption).fixedSize(horizontal: false, vertical: true)
-        TextField("Логин", text: $admin)
-        LabeledContent("Ключ для входа") {
+    @ViewBuilder private var accessRow: some View {
+        switch m.access {
+        case .idle:
+            Text("Впишите адрес — приложение проверит, пускает ли сервер по вашему SSH-ключу.")
+                .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+        case .checking:
+            HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Проверяю вход по ключу…").font(.caption) }
+        case .key(let root):
+            Label("Ваш ключ подходит (\(draft.adminTrimmed)\(root ? "" : ", через sudo")) — пароль не нужен.",
+                  systemImage: "checkmark.circle.fill")
+                .font(.caption).foregroundColor(Palette.green)
+        case .needPassword:
+            Label("Вашего ключа на сервере нет — войдите логином и паролем от сервера.", systemImage: "key")
+                .font(.caption).foregroundColor(Palette.orange)
+        case .failed(let e):
             HStack {
-                Text(adminKey.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "из ~/.ssh и агента")
-                    .font(.caption).foregroundColor(.secondary)
-                Button("Выбрать…") { if let p = pickKey() { adminKey = p } }
-                if adminKey != nil { Button("Сбросить") { adminKey = nil } }
+                Label(e, systemImage: "xmark.circle.fill").font(.caption).foregroundColor(Palette.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("Повторить") { Task { await m.probeAccess(currentDraft()) } }
             }
         }
-        setupButton("Проверить и настроить")
+    }
+
+    @ViewBuilder private var autoTab: some View {
+        Text("Приложение само зайдёт на сервер (Ubuntu или Debian), поставит прокси и заведёт пользователя, которому разрешён только туннель.")
+            .font(.caption).fixedSize(horizontal: false, vertical: true)
+        accessRow
+        if needPassword {
+            TextField("Логин", text: $draft.adminUser)
+            SecureField("Пароль", text: $password)
+            Toggle("Создать ключ для входа и добавить его на сервер", isOn: $makeAdminKey)
+            Text("Тогда в следующий раз пароль не понадобится, а вход по паролю можно будет выключить. Пароль нигде не сохраняется.")
+                .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+        } else {
+            DisclosureGroup("Другой логин или свой ключ") {
+                TextField("Логин", text: $draft.adminUser)
+                LabeledContent("Ключ") {
+                    HStack {
+                        Text(draft.adminKey.isEmpty ? "из ~/.ssh и агента" : (draft.adminKey as NSString).abbreviatingWithTildeInPath)
+                            .font(.caption).foregroundColor(.secondary)
+                        Button("Выбрать…") { if let p = pickKey() { draft.adminKey = p } }
+                        if !draft.adminKey.isEmpty { Button("Сбросить") { draft.adminKey = "" } }
+                    }
+                }
+                Text("Не root — нужен sudo без пароля.").font(.caption).foregroundColor(.secondary)
+            }
+            .font(.caption)
+        }
+        HStack {
+            Button("Настроить сервер") { runSetup() }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canSetup)
+            if m.setupBusy { ProgressView().controlSize(.small) }
+        }
+        if !m.setupSteps.isEmpty {
+            VStack(spacing: 0) { ForEach(m.setupSteps) { StepRow(step: $0) } }
+            if m.setupDone {
+                if m.mode == "tunnel" {
+                    Text("Готово. Туннель включён — перезапустите Claude, если он открыт.")
+                        .font(.caption).foregroundColor(Palette.green)
+                } else {
+                    Button("Включить туннель для Claude") { m.setMode("tunnel") }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+        }
     }
 
     @ViewBuilder private var manualTab: some View {
@@ -337,14 +377,50 @@ struct SettingsView: View {
         }
     }
 
-    private func setupButton(_ title: String) -> some View {
-        HStack {
-            Button(title) { runSetup() }
-                .buttonStyle(.borderedProminent)
-                .disabled(hostEmpty || m.setupBusy)
-            if m.setupBusy { ProgressView().controlSize(.small) }
-            if hostEmpty { Text("Сначала адрес сервера").font(.caption).foregroundColor(.secondary) }
-        }
+    // MARK: доступ к серверу
+
+    private var accessSection: some View {
+        Section {
+            LabeledContent("Вход по ключу") {
+                switch m.keyStable {
+                case .none: Text("не проверен").foregroundColor(.secondary)
+                case .some(true): Text("стабилен, 3 из 3").foregroundColor(Palette.green)
+                case .some(false): Text("не прошёл").foregroundColor(Palette.red)
+                }
+            }
+            LabeledContent("Вход по паролю") {
+                switch m.passwordLogin {
+                case .none: Text("неизвестно").foregroundColor(.secondary)
+                case .some(true): Text("включён").foregroundColor(Palette.orange)
+                case .some(false): Text("выключен").foregroundColor(Palette.green)
+                }
+            }
+            HStack {
+                Button("Проверить соединение") { Task { await m.checkConnection() } }
+                Button("Выключить вход по паролю") { Task { await m.disablePasswordLogin() } }
+                    .disabled(m.keyStable != true || m.passwordLogin == false)
+                if m.accessBusy { ProgressView().controlSize(.small) }
+            }
+            .disabled(m.accessBusy)
+            if m.keyStable == false || (m.access == .needPassword && !m.setupBusy) {
+                Text("Входа по ключу нет — его можно создать: приложение сделает ключ и добавит его на сервер по паролю.")
+                    .font(.caption).fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    SecureField("Пароль \(m.config.adminTrimmed)", text: $accessPassword)
+                    Button("Создать ключ и добавить") {
+                        let pw = accessPassword
+                        Task { await m.addAdminKeyNow(password: pw); accessPassword = "" }
+                    }
+                    .disabled(accessPassword.isEmpty || m.accessBusy)
+                }
+            }
+            if !m.accessNote.isEmpty {
+                Text(m.accessNote).font(.caption).foregroundColor(.primary.opacity(0.75))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("Выключить вход по паролю можно только после трёх успешных входов по ключу подряд — иначе легко потерять доступ к серверу.")
+                .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+        } header: { Text("Доступ к серверу") }
     }
 
     // MARK: действия
@@ -373,11 +449,11 @@ struct SettingsView: View {
 
     private func runSetup() {
         let c = currentDraft()
-        let pw = tab == .password ? password : ""
-        let key = tab == .key ? adminKey : nil
+        let pw = needPassword ? password : ""
+        let addKey = makeAdminKey
         note = ""
         Task {
-            await m.setupServer(c, admin: admin, password: pw, adminKey: key)
+            await m.setupServer(c, password: pw, makeAdminKey: addKey)
             if m.setupDone { password = "" }
             draft = m.config
             keyExists = draft.keyExists

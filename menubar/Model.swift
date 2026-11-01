@@ -321,35 +321,75 @@ final class Model: ObservableObject {
 
     // MARK: настройка сервера из приложения
 
+    enum Access: Equatable {
+        case idle, checking
+        case key(root: Bool)        // админ входит по ключу — пароль не нужен
+        case needPassword           // ни один ключ не подошёл
+        case failed(String)
+    }
+
+    /// Фоновая проверка входа по ключу: идёт, как только в настройках указан адрес.
+    @Published var access: Access = .idle
+    private var probeGen = 0
+
     @Published var setupSteps: [Step] = []
     @Published var setupBusy = false
     @Published var setupDone = false
-    /// Ключ не подошёл — нужен пароль (окно настроек показывает поле и переключает вкладку).
-    @Published var setupNeedsPassword = false
     /// Вошли по паролю — после настройки напомнить, что вход по паролю на сервере остался включён.
     @Published var setupByPassword = false
 
-    private func setupStep(_ i: Int, _ ok: Bool, _ detail: String = "") {
-        setupSteps[i].state = ok ? .ok : .fail
-        setupSteps[i].detail = detail
-        if ok && i + 1 < setupSteps.count { setupSteps[i + 1].state = .running }
+    // «Доступ к серверу» после настройки
+    @Published var accessBusy = false
+    @Published var keyStable: Bool?        // три входа по ключу подряд прошли
+    @Published var passwordLogin: Bool?    // сервер принимает вход по паролю
+    @Published var accessNote = ""
+    private var adminIsRoot = true
+
+    func probeAccess(_ c: Config) async {
+        probeGen += 1
+        let gen = probeGen
+        guard !c.hostTrimmed.isEmpty else { access = .idle; return }
+        access = .checking
+        let r = await ServerSetup.probe(c, admin: c.adminTrimmed, auth: c.adminAuth)
+        guard gen == probeGen else { return }   // адрес успели поменять
+        access = Model.access(from: r, admin: c.adminTrimmed)
     }
 
-    /// Всё за один проход: ключ туннеля → вход админом → скрипт сервера → сохранить настройки → туннель отвечает.
-    /// password пустой — только ключ: adminKey или ключи по умолчанию из ~/.ssh и агента.
-    /// С паролем сначала всё равно пробуется ключ: если он уже на сервере, пароль не нужен.
-    func setupServer(_ draft: Config, admin: String, password: String, adminKey: String?) async {
+    private static func access(from r: ProbeResult, admin: String) -> Access {
+        switch r {
+        case .root: return .key(root: true)
+        case .sudo: return .key(root: false)
+        case .noSudo: return .failed("\(admin) входит по ключу, но без sudo без пароля. Укажите логин root.")
+        case .denied: return .needPassword
+        case .failed(let e): return .failed(e)
+        }
+    }
+
+    private func setupStep(_ i: Int, _ ok: Bool, _ detail: String = "", next: Bool = true) {
+        setupSteps[i].state = ok ? .ok : .fail
+        setupSteps[i].detail = detail
+        if ok && next && i + 1 < setupSteps.count { setupSteps[i + 1].state = .running }
+    }
+
+    /// Всё за один проход: ключ туннеля → вход админом (сначала по ключу, пароль — только если ключа нет)
+    /// → скрипт сервера → по желанию ключ входа для админа → сохранить настройки → туннель отвечает.
+    func setupServer(_ draft: Config, password: String, makeAdminKey: Bool) async {
         guard !setupBusy else { return }
         setupBusy = true
         setupDone = false
-        setupNeedsPassword = false
+        setupByPassword = false
         defer { setupBusy = false }
-        setupSteps = makeSteps(["Ключ туннеля", "Вход на сервер", "Прокси на сервере", "Туннель работает"])
-        setupSteps[0].state = .running
         var c = draft
         c.host = c.hostTrimmed
         if c.keyPath.isEmpty { c.keyPath = Config.defaultKeyPath }
-        let admin = admin.trimmingCharacters(in: .whitespaces).isEmpty ? "root" : admin.trimmingCharacters(in: .whitespaces)
+        let admin = c.adminTrimmed
+        let wantAdminKey = makeAdminKey && !password.isEmpty
+        var titles = ["Ключ туннеля", "Вход на сервер", "Прокси на сервере"]
+        if wantAdminKey { titles.append("Ключ для входа на сервер") }
+        titles.append("Туннель работает")
+        let last = titles.count - 1
+        setupSteps = makeSteps(titles)
+        setupSteps[0].state = .running
         guard !c.host.isEmpty else { setupStep(0, false, "Укажите адрес сервера"); return }
 
         // 1. ключ туннеля
@@ -357,16 +397,16 @@ final class Model: ObservableObject {
         guard let pub = publicKey(for: c.keyPath) else { setupStep(0, false, "Нет файла \(c.keyPath).pub"); return }
         setupStep(0, true, (c.keyPath as NSString).abbreviatingWithTildeInPath)
 
-        // 2. вход: ключ, затем пароль
-        var auth = AdminAuth.key(adminKey)
+        // 2. вход: сначала ключ — если он уже на сервере, пароль не нужен
+        var auth = c.adminAuth
         var probe = await ServerSetup.probe(c, admin: admin, auth: auth)
-        var how = "по ключу"
         if probe == .denied && !password.isEmpty {
             auth = .password(password)
             probe = await ServerSetup.probe(c, admin: admin, auth: auth)
-            how = "по паролю"
         }
-        setupByPassword = (how == "по паролю")
+        var byPassword = false
+        if case .password = auth { byPassword = true }
+        let how = byPassword ? "по паролю" : "по ключу"
         switch probe {
         case .root: setupStep(1, true, "\(admin) \(how)")
         case .sudo: setupStep(1, true, "\(admin) \(how), через sudo")
@@ -375,7 +415,7 @@ final class Model: ObservableObject {
             return
         case .denied:
             if password.isEmpty {
-                setupNeedsPassword = true
+                access = .needPassword
                 setupStep(1, false, "Ключа для \(admin) на сервере нет — введите пароль.")
             } else {
                 setupStep(1, false, "Пароль не подошёл.")
@@ -383,16 +423,34 @@ final class Model: ObservableObject {
             return
         case .failed(let e): setupStep(1, false, e); return
         }
+        adminIsRoot = probe == .root
 
         // 3. скрипт сервера
-        if let e = await ServerSetup.install(c, admin: admin, auth: auth, root: probe == .root, publicKey: pub) {
+        if let e = await ServerSetup.install(c, admin: admin, auth: auth, root: adminIsRoot, publicKey: pub) {
             setupStep(2, false, e)
             return
         }
         setupStep(2, true, "tinyproxy на 127.0.0.1:\(c.remotePort), пользователь \(c.user)")
 
-        // 4. сохранить и дождаться туннеля
+        // 4. ключ входа для админа — не обязателен: неудача не останавливает настройку
+        if wantAdminKey {
+            if !byPassword {
+                setupStep(3, true, "не нужен — вход уже по ключу")
+            } else if let e = await addAdminKey(c, admin: admin, password: password) {
+                setupStep(3, false, e, next: false)
+                setupSteps[4].state = .running
+            } else {
+                c.adminKey = ""   // дальше входим ключом приложения (он в списке по умолчанию)
+                setupStep(3, true, (Config.adminKeyPath as NSString).abbreviatingWithTildeInPath)
+            }
+        }
+
+        // 5. сохранить и дождаться туннеля
+        c.adminUser = admin
         apply(c)
+        setupByPassword = byPassword
+        keyStable = nil
+        passwordLogin = byPassword ? true : nil
         var ip = "", loc = ""
         for _ in 0..<10 {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -400,11 +458,92 @@ final class Model: ObservableObject {
             if !ip.isEmpty { break }
         }
         if !ip.isEmpty && loc != "RU" {
-            setupStep(3, true, "выход: \(ip), \(loc)")
+            setupStep(last, true, "выход: \(ip), \(loc)")
             setupDone = true
         } else {
             let why = tunnel.lastError.isEmpty ? "нет ответа через туннель" : tunnel.lastError
-            setupStep(3, false, ip.isEmpty ? why : "выход \(ip), \(loc) — это Россия")
+            setupStep(last, false, ip.isEmpty ? why : "выход \(ip), \(loc) — это Россия")
+        }
+        await probeAccess(config)
+    }
+
+    /// Создаёт ключ входа приложения (если нет), кладёт его админу на сервер по паролю и проверяет вход по нему.
+    private func addAdminKey(_ c: Config, admin: String, password: String) async -> String? {
+        if let e = await generateKey(at: Config.adminKeyPath, comment: "proxy-tunnel-admin") { return "Ключ не создан: \(e)" }
+        guard let pub = publicKey(for: Config.adminKeyPath) else { return "Нет файла \(Config.adminKeyPath).pub" }
+        if let e = await ServerSetup.addAdminKey(c, admin: admin, auth: .password(password), publicKey: pub) { return e }
+        let r = await ServerSetup.probe(c, admin: admin, auth: .key(Config.adminKeyPath))
+        return r.canAdmin ? nil : "Ключ добавлен, но вход по нему не прошёл"
+    }
+
+    /// Кнопка «Создать ключ и добавить на сервер» после настройки (нужен пароль ещё раз).
+    func addAdminKeyNow(password: String) async {
+        guard !accessBusy else { return }
+        accessBusy = true
+        accessNote = "Создаю ключ и добавляю его на сервер…"
+        var c = config
+        let e = await addAdminKey(c, admin: c.adminTrimmed, password: password)
+        accessBusy = false
+        if let e { accessNote = e; return }
+        c.adminKey = ""
+        apply(c)
+        accessNote = "Ключ добавлен. Проверяю вход по нему…"
+        await checkConnection()
+    }
+
+    /// «Проверить соединение»: три входа по ключу подряд, включён ли вход по паролю, выход через туннель.
+    func checkConnection() async {
+        guard !accessBusy, !config.hostTrimmed.isEmpty else { return }
+        accessBusy = true
+        defer { accessBusy = false }
+        keyStable = nil
+        let c = config, admin = c.adminTrimmed
+        var ok = 0
+        var fail = ""
+        for i in 0..<3 {
+            accessNote = "Вход по ключу: \(i + 1) из 3…"
+            let r = await ServerSetup.probe(c, admin: admin, auth: c.adminAuth)
+            if r.canAdmin { ok += 1; adminIsRoot = r == .root } else {
+                if case .failed(let e) = r { fail = e } else if r == .denied { fail = "ключ не подошёл" } else { fail = "нет прав root" }
+                break
+            }
+            if i < 2 { try? await Task.sleep(nanoseconds: 1_000_000_000) }
+        }
+        keyStable = ok == 3
+        access = keyStable == true ? .key(root: adminIsRoot) : access
+        if keyStable == true {
+            passwordLogin = await ServerSetup.passwordEnabled(c, admin: admin, root: adminIsRoot)
+        } else {
+            passwordLogin = await ServerSetup.serverOffersPassword(c, admin: admin)
+        }
+        let (ip, loc) = await traceViaTunnel()
+        let tunnelText = ip.isEmpty ? "туннель не отвечает" : "туннель: выход \(ip), \(loc)"
+        accessNote = (keyStable == true ? "Вход по ключу: 3 из 3." : "Вход по ключу не прошёл (\(ok) из 3): \(fail).") + " " + tunnelText
+        refresh()
+    }
+
+    /// «Выключить вход по паролю» — только после того, как вход по ключу прошёл три раза подряд.
+    func disablePasswordLogin() async {
+        guard !accessBusy, keyStable == true else { return }
+        accessBusy = true
+        defer { accessBusy = false }
+        let c = config, admin = c.adminTrimmed
+        accessNote = "Выключаю вход по паролю…"
+        if let e = await ServerSetup.disablePassword(c, admin: admin, root: adminIsRoot) {
+            accessNote = "Не выключено: \(e)"
+            return
+        }
+        let r = await ServerSetup.probe(c, admin: admin, auth: c.adminAuth)
+        let offers = await ServerSetup.serverOffersPassword(c, admin: admin)
+        passwordLogin = offers
+        if !r.canAdmin {
+            keyStable = false
+            accessNote = "Вход по паролю выключен, но повторный вход по ключу не прошёл. Не закрывайте приложение и нажмите «Проверить соединение»; копия прежних настроек ssh — на сервере в /root/proxy-tunnel-backup-…"
+        } else if offers == false {
+            setupByPassword = false
+            accessNote = "Вход по паролю выключен. Вход по ключу работает."
+        } else {
+            accessNote = "Скрипт отработал, но сервер всё ещё предлагает вход по паролю — посмотрите журнал."
         }
     }
 
@@ -421,11 +560,11 @@ final class Model: ObservableObject {
 
     // MARK: ключ и прочее
 
-    func generateKey(at path: String) async -> String? {
+    func generateKey(at path: String, comment: String = "proxy-tunnel") async -> String? {
         guard !FileManager.default.fileExists(atPath: path) else { return nil }
         try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
                                                  withIntermediateDirectories: true)
-        let (code, out) = await run(["/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "proxy-tunnel",
+        let (code, out) = await run(["/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", comment,
                                      "-f", path])
         return code == 0 ? nil : out
     }

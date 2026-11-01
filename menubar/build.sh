@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")"
 APP="build/Proxy Tunnel.app"
 rm -rf build && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp ../server/setup.sh "$APP/Contents/Resources/setup.sh"   # скрипт сервера — общий для всех версий
+cp ../server/*.sh "$APP/Contents/Resources/"   # скрипты сервера — общие для всех версий
 for arch in x86_64 arm64; do
   swiftc -O -parse-as-library -target "$arch-apple-macos13.0" Config.swift Tunnel.swift Setup.swift Model.swift Views.swift -o "build/tunnel-$arch"
 done

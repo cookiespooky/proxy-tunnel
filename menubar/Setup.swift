@@ -1,38 +1,40 @@
-// Настройка сервера из приложения: вход под админом (по ключу или паролю) и запуск server/setup.sh.
+// Работа с сервером от имени админа: вход по ключу или паролю, скрипты из server/, проверки доступа.
 // Пароль передаётся ssh через SSH_ASKPASS (OpenSSH ≥ 8.4) и нигде не сохраняется.
 import Foundation
 
-/// Скрипт сервера, вложенный в приложение при сборке (build.sh кладёт server/setup.sh в Resources).
+/// Скрипты сервера, вложенные в приложение при сборке (build.sh кладёт server/*.sh в Resources).
 enum ServerScript {
-    static var text: String? {
-        Bundle.main.url(forResource: "setup", withExtension: "sh").flatMap { try? String(contentsOf: $0) }
+    static func text(_ name: String = "setup") -> String? {
+        Bundle.main.url(forResource: name, withExtension: "sh").flatMap { try? String(contentsOf: $0) }
     }
 
-    /// Переменные для скрипта как строка «KEY='…' …».
+    /// Переменные для setup.sh как строка «KEY='…' …».
     static func env(_ c: Config, publicKey: String) -> String {
         "TUNNEL_USER=\(sq(c.user)) PROXY_PORT=\(c.remotePort) PUBKEY=\(sq(publicKey))"
     }
 
     /// Команда для ручной вставки в консоль сервера: работает и под root, и под пользователем с sudo.
     static func manualCommand(_ c: Config, publicKey: String) -> String? {
-        guard let s = text else { return nil }
+        guard let s = text() else { return nil }
         return "sudo env \(env(c, publicKey: publicKey)) bash <<'PROXYTUNNEL'\n\(s)\nPROXYTUNNEL\n"
     }
 }
 
 func sq(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
-/// Как админ может войти на сервер.
+/// Как админ входит на сервер.
 enum AdminAuth {
-    case key(String?)        // nil — ключи по умолчанию из ~/.ssh и агент
+    case key(String?)        // nil — свои ключи из ~/.ssh, агент и ключ входа, созданный приложением
     case password(String)
 }
 
 enum ProbeResult: Equatable {
     case root, sudo            // можно настраивать
     case noSudo                // вошли, но прав не хватает
-    case denied                // ключ не подошёл
+    case denied                // не пустили (ключ не подошёл / неверный пароль)
     case failed(String)        // сервер не отвечает, сменился ключ сервера и т. п.
+
+    var canAdmin: Bool { self == .root || self == .sudo }
 }
 
 /// Запускает ssh с данными на stdin и дополнительным окружением; возвращает код выхода и весь вывод.
@@ -72,6 +74,14 @@ func runSSH(_ args: [String], env extra: [String: String] = [:], stdin: String? 
 }
 
 enum ServerSetup {
+    /// Ключи, которые ssh пробует сам, — но только пока не задан ни один -i. Задаём их явно.
+    static var defaultIdentities: [String] {
+        let ssh = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh")
+        return ["id_ed25519", "id_ecdsa", "id_rsa", "id_ed25519_sk", "id_ecdsa_sk"]
+            .map { ssh.appendingPathComponent($0).path }
+            .filter { FileManager.default.fileExists(atPath: $0) }
+    }
+
     /// Общие параметры ssh для входа админом: тот же known_hosts, что у туннеля, и тот же интерфейс.
     static func baseArgs(_ c: Config, auth: AdminAuth) -> [String] {
         var a = ["-F", "none", "-T",
@@ -84,7 +94,13 @@ enum ServerSetup {
         switch auth {
         case .key(let path):
             a += ["-o", "BatchMode=yes", "-o", "PreferredAuthentications=publickey"]
-            if let p = path { a += ["-i", p, "-o", "IdentitiesOnly=yes"] }
+            if let p = path {
+                a += ["-i", p, "-o", "IdentitiesOnly=yes"]
+            } else {
+                var ids = defaultIdentities
+                if FileManager.default.fileExists(atPath: Config.adminKeyPath) { ids.insert(Config.adminKeyPath, at: 0) }
+                for p in ids { a += ["-i", p] }
+            }
         case .password:
             a += ["-o", "PreferredAuthentications=password,keyboard-interactive",
                   "-o", "PubkeyAuthentication=no", "-o", "NumberOfPasswordPrompts=1"]
@@ -104,6 +120,14 @@ enum ServerSetup {
         defer { try? FileManager.default.removeItem(at: dir) }
         return await body(["SSH_ASKPASS": helper.path, "SSH_ASKPASS_REQUIRE": "force",
                            "DISPLAY": ":0", "PT_ASKPASS_SECRET": pw])
+    }
+
+    /// Команда на сервере от имени админа: stdin — текст скрипта или nil.
+    static func exec(_ c: Config, admin: String, auth: AdminAuth, _ cmd: String, stdin: String? = nil,
+                     timeout: Double = 600) async -> (Int32, String) {
+        await withPassword(auth) { env in
+            await runSSH(baseArgs(c, auth: auth) + ["\(admin)@\(c.hostTrimmed)", cmd], env: env, stdin: stdin, timeout: timeout)
+        }
     }
 
     /// Понятная причина отказа ssh.
@@ -128,12 +152,17 @@ enum ServerSetup {
         return last.isEmpty ? "ssh завершился с кодом \(code)" : last
     }
 
+    static func scriptError(_ out: String, code: Int32) -> String {
+        if let e = out.split(separator: "\n").first(where: { $0.hasPrefix("PT-ERROR:") }) {
+            return String(e.dropFirst("PT-ERROR:".count)).trimmingCharacters(in: .whitespaces)
+        }
+        return explain(out, code: code)
+    }
+
     /// Пробует войти и узнать, хватит ли прав на настройку.
     static func probe(_ c: Config, admin: String, auth: AdminAuth) async -> ProbeResult {
         let cmd = "if [ \"$(id -u)\" = 0 ]; then echo PT-ROOT; elif sudo -n true 2>/dev/null; then echo PT-SUDO; else echo PT-NOSUDO; fi"
-        let (code, out) = await withPassword(auth) { env in
-            await runSSH(baseArgs(c, auth: auth) + ["\(admin)@\(c.hostTrimmed)", cmd], env: env, timeout: 40)
-        }
+        let (code, out) = await exec(c, admin: admin, auth: auth, cmd, timeout: 40)
         if out.contains("PT-ROOT") { return .root }
         if out.contains("PT-SUDO") { return .sudo }
         if out.contains("PT-NOSUDO") { return .noSudo }
@@ -142,18 +171,54 @@ enum ServerSetup {
         return .failed(explain(out, code: code))
     }
 
-    /// Запускает скрипт сервера; nil — успех, иначе причина.
+    /// Запускает скрипт из server/ под root (или через sudo); nil — успех, иначе причина.
+    static func runScript(_ name: String, _ c: Config, admin: String, auth: AdminAuth, root: Bool,
+                          env: String = "", success: String) async -> String? {
+        guard let script = ServerScript.text(name) else { return "В приложении нет скрипта \(name).sh — пересоберите его build.sh." }
+        let remote = (root ? "" : "sudo -n ") + "env \(env) bash -s"
+        let (code, out) = await exec(c, admin: admin, auth: auth, remote, stdin: script)
+        Log.append("\(name).sh на \(c.hostTrimmed): код \(code)\n\(out)")
+        if code == 0 && out.contains(success) { return nil }
+        return scriptError(out, code: code)
+    }
+
     static func install(_ c: Config, admin: String, auth: AdminAuth, root: Bool, publicKey: String) async -> String? {
-        guard let script = ServerScript.text else { return "В приложении нет скрипта сервера — пересоберите его build.sh." }
-        let remote = (root ? "" : "sudo -n ") + "env \(ServerScript.env(c, publicKey: publicKey)) bash -s"
-        let (code, out) = await withPassword(auth) { env in
-            await runSSH(baseArgs(c, auth: auth) + ["\(admin)@\(c.hostTrimmed)", remote], env: env, stdin: script)
-        }
-        Log.append("настройка сервера \(c.hostTrimmed): код \(code)\n\(out)")
-        if code == 0 && out.contains("сервер готов") { return nil }
-        if let e = out.split(separator: "\n").first(where: { $0.hasPrefix("PT-ERROR:") }) {
-            return String(e.dropFirst("PT-ERROR:".count)).trimmingCharacters(in: .whitespaces)
-        }
-        return explain(out, code: code)
+        await runScript("setup", c, admin: admin, auth: auth, root: root,
+                        env: ServerScript.env(c, publicKey: publicKey), success: "сервер готов")
+    }
+
+    static func disablePassword(_ c: Config, admin: String, root: Bool) async -> String? {
+        await runScript("no-password", c, admin: admin, auth: .key(nil), root: root, success: "вход по паролю выключен")
+    }
+
+    /// Добавляет публичный ключ админу в ~/.ssh/authorized_keys (под его же входом); nil — успех.
+    static func addAdminKey(_ c: Config, admin: String, auth: AdminAuth, publicKey: String) async -> String? {
+        let k = sq(publicKey)
+        let cmd = "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && " +
+            "(grep -qxF \(k) ~/.ssh/authorized_keys || echo \(k) >> ~/.ssh/authorized_keys) && echo PT-OK"
+        let (code, out) = await exec(c, admin: admin, auth: auth, cmd, timeout: 40)
+        Log.append("ключ входа для \(admin)@\(c.hostTrimmed): код \(code)\n\(out)")
+        return out.contains("PT-OK") ? nil : explain(out, code: code)
+    }
+
+    /// Включён ли вход по паролю в sshd (по sshd -T на сервере); nil — не удалось узнать.
+    static func passwordEnabled(_ c: Config, admin: String, root: Bool) async -> Bool? {
+        let cmd = (root ? "" : "sudo -n ") + "sshd -T 2>/dev/null | grep -i '^passwordauthentication '"
+        let (_, out) = await exec(c, admin: admin, auth: .key(nil), cmd, timeout: 40)
+        let s = out.lowercased()
+        if s.contains("passwordauthentication yes") { return true }
+        if s.contains("passwordauthentication no") { return false }
+        return nil
+    }
+
+    /// Снаружи: предлагает ли сервер вход по паролю. Ответ ssh «Permission denied (publickey,password)».
+    static func serverOffersPassword(_ c: Config, admin: String) async -> Bool? {
+        var a = baseArgs(c, auth: .password(""))
+        a += ["-o", "BatchMode=yes", "\(admin)@\(c.hostTrimmed)", "true"]
+        let (_, out) = await runSSH(a, timeout: 40)
+        guard let r = out.range(of: "Permission denied ("),
+              let end = out[r.upperBound...].firstIndex(of: ")") else { return nil }
+        let methods = out[r.upperBound..<end]
+        return methods.contains("password") || methods.contains("keyboard-interactive")
     }
 }

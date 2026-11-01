@@ -11,6 +11,8 @@ struct Config: Codable, Equatable {
     var pacPort = 8889
     var interface = "en0"
     var networkService = "Wi-Fi"
+    var adminUser = "root"    // кто настраивает сервер
+    var adminKey = ""         // свой ключ входа на сервер; пусто — ~/.ssh, агент и ключ входа приложения
     var domains = ["claude.ai", "claude.com", "anthropic.com", "claudeusercontent.com", "claude.site",
                    "threads.net", "threads.com"]
 
@@ -28,6 +30,8 @@ struct Config: Codable, Equatable {
         pacPort = try c.decodeIfPresent(Int.self, forKey: .pacPort) ?? d.pacPort
         interface = try c.decodeIfPresent(String.self, forKey: .interface) ?? d.interface
         networkService = try c.decodeIfPresent(String.self, forKey: .networkService) ?? d.networkService
+        adminUser = try c.decodeIfPresent(String.self, forKey: .adminUser) ?? d.adminUser
+        adminKey = try c.decodeIfPresent(String.self, forKey: .adminKey) ?? d.adminKey
         domains = try c.decodeIfPresent([String].self, forKey: .domains) ?? d.domains
     }
 
@@ -43,6 +47,8 @@ struct Config: Codable, Equatable {
     static var fileURL: URL { supportDir.appendingPathComponent("config.json") }
     static var knownHostsURL: URL { supportDir.appendingPathComponent("known_hosts") }
     static var defaultKeyPath: String { supportDir.appendingPathComponent("id_ed25519").path }
+    /// Ключ входа на сервер админом, который приложение создаёт по просьбе пользователя (не ключ туннеля).
+    static var adminKeyPath: String { supportDir.appendingPathComponent("admin_ed25519").path }
     static var logURL: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Proxy Tunnel.log")
     }
@@ -60,6 +66,8 @@ struct Config: Codable, Equatable {
     }
 
     var hostTrimmed: String { host.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var adminTrimmed: String { let a = adminUser.trimmingCharacters(in: .whitespaces); return a.isEmpty ? "root" : a }
+    var adminAuth: AdminAuth { adminKey.isEmpty ? .key(nil) : .key(adminKey) }
     var keyExists: Bool { FileManager.default.fileExists(atPath: keyPath) }
     var isComplete: Bool { !hostTrimmed.isEmpty && keyExists }
     var proxyURL: String { "http://127.0.0.1:\(localPort)" }
