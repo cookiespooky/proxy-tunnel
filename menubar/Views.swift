@@ -41,7 +41,6 @@ struct StatusCard: View {
     }
 
     private var status: (title: String, subtitle: String, icon: String, color: Color) {
-        if !m.config.isComplete { return ("Не настроено", "Откройте настройки", "gearshape.fill", Palette.orange) }
         if m.checking { return ("Проверяю…", "", "", .secondary) }
         switch m.mode {
         case "tunnel":
@@ -94,6 +93,43 @@ struct StepRow: View {
     }
 }
 
+/// Вкладка «Туннель», пока он не настроен: что это и как настроить. Режим при этом остаётся VPN.
+struct TunnelSetupCard: View {
+    @ObservedObject var m: Model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    Circle().fill(Palette.orange.opacity(0.16)).frame(width: 38, height: 38)
+                    Image(systemName: "point.3.connected.trianglepath.dotted")
+                        .font(.system(size: 16, weight: .semibold)).foregroundColor(Palette.orange)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Туннель не настроен").font(.system(size: 14, weight: .semibold))
+                    Text("Свой сервер за границей: через него идут только Claude и выбранные сайты, остальное — напрямую. VPN не нужен. Пока туннель не настроен, работает VPN.")
+                        .font(.system(size: 12)).foregroundColor(Palette.sub)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Button { SettingsWindow.show(m) } label: {
+                Text("Настроить туннель…").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            if m.config.hostTrimmed.isEmpty {
+                Link(destination: Config.rentServerURL) {
+                    Text("Нет сервера? Арендовать").frame(maxWidth: .infinity)
+                }
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(Palette.blue)
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.card))
+    }
+}
+
 struct PanelView: View {
     @ObservedObject var m: Model
 
@@ -116,8 +152,8 @@ struct PanelView: View {
             }
 
             Picker("", selection: Binding(
-                get: { m.mode == "vpn" ? "vpn" : "tunnel" },
-                set: { m.setMode($0) }
+                get: { m.tab },
+                set: { t in m.tab = t; m.setMode(t) }   // ненастроенный туннель: только вкладка, режим не меняется
             )) {
                 Text("Туннель").tag("tunnel")
                 Text("VPN").tag("vpn")
@@ -126,30 +162,24 @@ struct PanelView: View {
             .labelsHidden()
             .disabled(m.busy)
 
-            StatusCard(m: m)
+            if m.tab == "tunnel" && !m.config.isComplete {
+                TunnelSetupCard(m: m)
+            } else {
+                StatusCard(m: m)
 
-            if !m.config.isComplete {
-                Button { SettingsWindow.show(m) } label: {
-                    Text("Настроить…").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                if m.config.hostTrimmed.isEmpty {
-                    Link(destination: Config.rentServerURL) {
-                        Text("Нет сервера? Арендовать").frame(maxWidth: .infinity)
+                VStack(spacing: 0) {
+                    ForEach(Array(m.steps.enumerated()), id: \.element.id) { i, step in
+                        StepRow(step: step)
+                        if i < m.steps.count - 1 { Divider().padding(.leading, 40) }
                     }
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(Palette.blue)
                 }
-            }
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.card))
 
-            VStack(spacing: 0) {
-                ForEach(Array(m.steps.enumerated()), id: \.element.id) { i, step in
-                    StepRow(step: step)
-                    if i < m.steps.count - 1 { Divider().padding(.leading, 40) }
+                if !m.config.isComplete {
+                    Text("Свой туннель не настроен — вкладка «Туннель».")
+                        .font(.system(size: 12)).foregroundColor(Palette.sub)
                 }
             }
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.card))
 
             if !m.message.isEmpty {
                 Text(m.message).font(.system(size: 12)).foregroundColor(Palette.sub)
@@ -162,7 +192,9 @@ struct PanelView: View {
                         .font(.system(size: 12)).foregroundColor(Palette.sub)
                 }
                 Spacer()
-                Button("Переподключить") { m.reconnect() }.disabled(m.busy || !m.config.isComplete)
+                if m.config.isComplete {
+                    Button("Переподключить") { m.reconnect() }.disabled(m.busy)
+                }
                 Button("Проверить") { m.refresh() }.disabled(m.busy)
             }
             .buttonStyle(.borderless)
@@ -275,7 +307,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 500)
+        .frame(minWidth: 500, idealWidth: 500, maxWidth: 500, minHeight: 420, idealHeight: 760, maxHeight: .infinity)
         .onAppear { load() }
         .onReceive(NotificationCenter.default.publisher(for: SettingsWindow.shown)) { _ in load() }
         // Фоновая проверка входа по ключу: через секунду после того, как адрес, порт, логин или ключ перестали меняться.
@@ -547,9 +579,13 @@ enum SettingsWindow {
 
     static func show(_ m: Model) {
         if window == nil {
-            let w = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(m: m)))
+            // Form в окне не сообщает свою высоту — без явного размера окно сжимается до одной шапки.
+            let hc = NSHostingController(rootView: SettingsView(m: m))
+            hc.sizingOptions = [.minSize]
+            let w = NSWindow(contentViewController: hc)
             w.title = "Настройки Proxy Tunnel"
-            w.styleMask = [.titled, .closable, .miniaturizable]
+            w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            w.setContentSize(NSSize(width: 500, height: 760))
             w.isReleasedWhenClosed = false
             w.center()
             window = w

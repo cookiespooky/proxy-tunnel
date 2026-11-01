@@ -104,7 +104,10 @@ final class Model: ObservableObject {
     static var current: Model?
 
     @Published var config: Config
-    @Published var mode = "?"            // tunnel | happ | mixed
+    @Published var mode = "?"            // tunnel | vpn | mixed
+    /// Вкладка окошка значка. Совпадает с режимом, кроме одного случая: туннель ещё не настроен,
+    /// а пользователь открыл вкладку «Туннель» — там настройка, а режим остаётся VPN.
+    @Published var tab = "tunnel"
     @Published var steps: [Step] = makeSteps(tunnelSteps)
     @Published var verdictOK = false
     @Published var directLoc = ""
@@ -139,7 +142,6 @@ final class Model: ObservableObject {
     }
 
     var icon: String {
-        if !config.isComplete { return "questionmark.circle" }
         switch mode {
         case "tunnel": return verdictOK ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
         case "vpn": return "shield.lefthalf.filled"
@@ -185,6 +187,8 @@ final class Model: ObservableObject {
         if cc == config.proxyURL && on && url == config.pacURL { mode = "tunnel" }
         else if cc == nil && !on { mode = "vpn" }
         else { mode = "mixed" }
+        // Ненастроенный туннель: вкладку выбирает пользователь (на «Туннеле» — настройка), режим остаётся VPN.
+        if config.isComplete || mode != "vpn" { tab = mode == "vpn" ? "vpn" : "tunnel" }
     }
 
     private func applyTunnelMode() async -> String? {
@@ -206,10 +210,7 @@ final class Model: ObservableObject {
 
     func setMode(_ target: String) {
         guard target != mode, !busy else { return }
-        if target == "tunnel" && !config.isComplete {
-            message = "Сначала укажите сервер и ключ в настройках."
-            return
-        }
+        if target == "tunnel" && !config.isComplete { return }   // вкладка «Туннель» покажет настройку
         busy = true
         message = ""
         Task {
@@ -239,12 +240,8 @@ final class Model: ObservableObject {
         if !quiet { checking = true }
         Task {
             await detectMode()
-            if !config.isComplete {
-                work = [Step(id: 0, title: "Настройки", state: .fail,
-                             detail: "Укажите сервер и ключ: «Настройки…»")]
-                verdictOK = false
-            } else if mode == "vpn" {
-                await checkVPN()
+            if !config.isComplete || mode == "vpn" {
+                await checkVPN()   // туннеля нет или он выключен — Claude ходит через VPN, его и проверяем
             } else {
                 await checkTunnel()
             }
