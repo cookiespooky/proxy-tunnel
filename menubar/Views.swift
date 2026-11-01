@@ -219,6 +219,7 @@ struct SettingsView: View {
     @State private var makeAdminKey = true
     @State private var accessPassword = ""
     @State private var flashHost = false
+    @State private var loaded = false
     @State private var confirmForget = false
     @FocusState private var hostFocused: Bool
 
@@ -307,8 +308,10 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(minWidth: 500, idealWidth: 500, maxWidth: 500, minHeight: 420, idealHeight: 760, maxHeight: .infinity)
-        .onAppear { load() }
-        .onReceive(NotificationCenter.default.publisher(for: SettingsWindow.shown)) { _ in load() }
+        // Введённое не теряется: при повторном показе окна (из значка, после переключения на другое окно)
+        // сохранённые настройки подставляются, только если правок нет. Сбросить правки — «Отменить».
+        .onAppear { loadIfUntouched() }
+        .onReceive(NotificationCenter.default.publisher(for: SettingsWindow.shown)) { _ in loadIfUntouched() }
         .alert("Забыть ключ сервера?", isPresented: $confirmForget) {
             Button("Забыть", role: .destructive) { m.forgetHostKey(); note = m.message }
             Button("Отмена", role: .cancel) {}
@@ -466,7 +469,15 @@ struct SettingsView: View {
         return c
     }
 
+    /// Есть ли в окне несохранённые правки (пароль в настройки не входит и не сбрасывается вовсе).
+    private var edited: Bool { loaded && currentDraft() != m.config }
+
+    private func loadIfUntouched() {
+        if !edited { load() }
+    }
+
     private func load() {
+        loaded = true
         draft = m.config
         domainsText = m.config.domains.joined(separator: "\n")
         keyExists = draft.keyExists
@@ -568,7 +579,8 @@ enum SettingsWindow {
             w.title = "Настройки Proxy Tunnel"
             w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             w.setContentSize(NSSize(width: 500, height: 760))
-            w.isReleasedWhenClosed = false
+            w.isReleasedWhenClosed = false   // закрыли — окно и введённое в нём остаются до следующего показа
+            w.hidesOnDeactivate = false      // переключились на другое окно — настройки не прячутся
             w.center()
             window = w
         } else {
