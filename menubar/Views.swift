@@ -415,7 +415,7 @@ struct SettingsView: View {
                 if m.accessBusy { ProgressView().controlSize(.small).padding(.leading, 6) }
             }
             .disabled(m.accessBusy)
-            if m.keyStable == false || (m.access == .needPassword && !m.setupBusy) {
+            if m.keyDenied || (m.access == .needPassword && !m.setupBusy) {
                 Text("Входа по ключу нет — его можно создать: приложение сделает ключ и добавит его на сервер по паролю.")
                     .font(.caption).fixedSize(horizontal: false, vertical: true)
                 HStack {

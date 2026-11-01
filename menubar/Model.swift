@@ -369,6 +369,8 @@ final class Model: ObservableObject {
     @Published var keyStable: Bool?        // три входа по ключу подряд прошли
     @Published var passwordLogin: Bool?    // сервер принимает вход по паролю
     @Published var accessNote = ""
+    /// Сервер именно не принял ключ (а не отклонил подключение) — тогда предлагаем создать ключ.
+    @Published var keyDenied = false
     private var adminIsRoot = true
 
     func probeAccess(_ c: Config) async {
@@ -388,6 +390,7 @@ final class Model: ObservableObject {
         case .sudo: return .key(root: false)
         case .noSudo: return .failed("\(admin) входит по ключу, но без sudo без пароля. Укажите логин root.")
         case .denied: return .needPassword
+        case .refused: return .failed(ServerSetup.explain("connection refused", code: 255))
         case .failed(let e): return .failed(e)
         }
     }
@@ -457,6 +460,7 @@ final class Model: ObservableObject {
                 setupStep(1, false, "Пароль не подошёл.")
             }
             return
+        case .refused: setupStep(1, false, ServerSetup.explain("connection refused", code: 255)); return
         case .failed(let e): setupStep(1, false, e); return
         }
         adminIsRoot = probe == .root
@@ -500,7 +504,17 @@ final class Model: ObservableObject {
             let why = tunnel.lastError.isEmpty ? "нет ответа через туннель" : tunnel.lastError
             setupStep(last, false, ip.isEmpty ? why : "выход \(ip), \(loc) — это Россия")
         }
-        await probeAccess(config)
+        // Вход по ключу уже известен — без ещё одного подключения (на сервере может быть ограничение частоты).
+        let keyWorks = !byPassword || (wantAdminKey && setupSteps[3].state == .ok)
+        access = keyWorks ? .key(root: adminIsRoot) : .needPassword
+        if setupDone && keyWorks {
+            // Проверка соединения — сама, когда пройдут полминуты лимита после всплеска подключений настройки.
+            accessNote = "Через полминуты проверю вход по ключу — сразу после настройки сервер может ограничивать подключения."
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 35_000_000_000)
+                await self?.checkConnection()
+            }
+        }
     }
 
     /// Создаёт ключ входа приложения (если нет), кладёт его админу на сервер по паролю и проверяет вход по нему.
@@ -533,18 +547,34 @@ final class Model: ObservableObject {
         accessBusy = true
         defer { accessBusy = false }
         keyStable = nil
+        keyDenied = false
         let c = config, admin = c.adminTrimmed
         await Net.prepare(c.hostTrimmed, interface: c.effectiveInterface)
         var ok = 0
         var fail = ""
-        for i in 0..<3 {
+        var waits = 0
+        var i = 0
+        while i < 3 {
             accessNote = "Вход по ключу: \(i + 1) из 3…"
             let r = await ServerSetup.probe(c, admin: admin, auth: c.adminAuth)
+            if r == .refused && waits < 2 {
+                // Не провал ключа: сервер ограничивает частоту подключений. Ждём, пока окно лимита освободится.
+                waits += 1
+                accessNote = "Сервер ограничивает частоту подключений — жду 30 секунд и повторяю…"
+                try? await Task.sleep(nanoseconds: 31_000_000_000)
+                continue
+            }
             if r.canAdmin { ok += 1; adminIsRoot = r == .root } else {
-                if case .failed(let e) = r { fail = e } else if r == .denied { fail = "ключ не подошёл" } else { fail = "нет прав root" }
+                switch r {
+                case .failed(let e): fail = e
+                case .refused: fail = ServerSetup.explain("connection refused", code: 255)
+                case .denied: fail = "сервер не принял ключ"; keyDenied = true
+                default: fail = "нет прав root"
+                }
                 break
             }
-            if i < 2 { try? await Task.sleep(nanoseconds: 2_000_000_000) }   // не упереться в ограничение частоты
+            i += 1
+            if i < 3 { try? await Task.sleep(nanoseconds: 3_000_000_000) }   // не упереться в ограничение частоты
         }
         keyStable = ok == 3
         access = keyStable == true ? .key(root: adminIsRoot) : access

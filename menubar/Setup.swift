@@ -32,6 +32,7 @@ enum ProbeResult: Equatable {
     case root, sudo            // можно настраивать
     case noSudo                // вошли, но прав не хватает
     case denied                // не пустили (ключ не подошёл / неверный пароль)
+    case refused               // сервер отклонил само подключение — обычно ограничение частоты (ufw limit)
     case failed(String)        // сервер не отвечает, сменился ключ сервера и т. п.
 
     var canAdmin: Bool { self == .root || self == .sudo }
@@ -188,6 +189,7 @@ enum ServerSetup {
         if out.contains("PT-NOSUDO") { return .noSudo }
         Log.append("вход \(admin)@\(c.hostTrimmed): код \(code)\n\(out)")
         if code == 255 && out.lowercased().contains("permission denied") { return .denied }
+        if out.lowercased().contains("connection refused") { return .refused }
         return .failed(explain(out, code: code))
     }
 
