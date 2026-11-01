@@ -415,6 +415,8 @@ sealed class SettingsForm : Form
 
         // фоновая проверка входа по ключу — через секунду после того, как адрес или порт перестали меняться
         host.TextChanged += (_, _) => { if (loaded) { probeTimer.Stop(); probeTimer.Start(); } Sync(); };
+        password.TextChanged += (_, _) => Sync();
+        login.TextChanged += (_, _) => Sync();
         sshPort.ValueChanged += (_, _) => { if (loaded) { probeTimer.Stop(); probeTimer.Start(); } };
         probeTimer.Tick += async (_, _) => { probeTimer.Stop(); await core.ProbeAccess(Draft()); };
 
@@ -501,7 +503,7 @@ sealed class SettingsForm : Form
         if (AlreadySetUp && MessageBox.Show(this,
                 "Прокси на сервере поставится заново, его настройки перезапишутся. Ключи и вход на сервер не пропадут, но туннель прервётся на несколько секунд. Нужно, если туннель перестал работать или сервер переустановили.",
                 "Сервер уже настроен", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
-        var pw = core.Access == AccessState.NeedPassword ? password.Text : "";
+        var pw = pwPanel.Visible ? password.Text : "";
         note.Text = "";
         await core.SetupServer(Draft(), pw, makeKey.Checked);
         if (core.SetupDone) password.Text = "";
@@ -542,8 +544,9 @@ sealed class SettingsForm : Form
         access.Visible = access.Text.Length > 0;
         pwPanel.Visible = core.Access == AccessState.NeedPassword;
         setupButton.Text = core.SetupBusy ? "Настраиваю…" : AlreadySetUp ? "Настроить заново…" : "Настроить сервер";
-        setupButton.Enabled = !core.SetupBusy && (!hostSet || core.Access == AccessState.Key ||
-                              (core.Access == AccessState.NeedPassword && password.Text.Length > 0) || core.Access == AccessState.Failed);
+        // Кнопка доступна всегда, кроме самой настройки: без адреса она подсветит поле, а ключ или пароль
+        // выберет сама настройка (сначала ключ, затем пароль, если он введён).
+        setupButton.Enabled = !core.SetupBusy;
         Ui.FillSteps(setupSteps, core.SetupSteps, W);
         setupSteps.Visible = core.SetupSteps.Count > 0;
         setupDone.Text = core.SetupDone ? "Готово. Туннель включён — перезапустите Claude, если он был открыт." : "";

@@ -343,14 +343,9 @@ struct SettingsView: View {
         }
     }
 
-    private var canSetup: Bool {
-        guard !draft.hostTrimmed.isEmpty, !m.setupBusy else { return false }
-        switch m.access {
-        case .key: return true
-        case .needPassword: return !password.isEmpty
-        default: return false
-        }
-    }
+    /// Кнопка доступна всегда, кроме самой настройки: ключ или пароль выберет сама настройка
+    /// (сначала ключ, затем пароль, если он введён).
+    private var canSetup: Bool { !draft.hostTrimmed.isEmpty && !m.setupBusy }
 
     @ViewBuilder private var accessRow: some View {
         switch m.access {
