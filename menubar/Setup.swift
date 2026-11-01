@@ -82,8 +82,14 @@ enum ServerSetup {
             .filter { FileManager.default.fileExists(atPath: $0) }
     }
 
+    /// Общее соединение для команд админа. На серверах бывает ограничение частоты подключений к ssh
+    /// (ufw limit: 6 за 30 секунд с одного адреса, дальше — отказ), а настройка — это несколько команд подряд.
+    /// Путь короткий: у сокета предел ~104 байта, временная папка macOS для него слишком длинная.
+    static let controlPath = "/tmp/pt-%C"
+
     /// Общие параметры ssh для входа админом: тот же known_hosts, что у туннеля, и тот же интерфейс.
-    static func baseArgs(_ c: Config, auth: AdminAuth) -> [String] {
+    /// shared — через общее соединение (команды); без него — отдельный вход (когда проверяем сам вход).
+    static func baseArgs(_ c: Config, auth: AdminAuth, shared: Bool = false) -> [String] {
         var a = ["-F", "none", "-T",
                  "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=20", "-o", "LogLevel=ERROR",
                  "-o", "UserKnownHostsFile=\"\(Config.knownHostsURL.path)\"",
@@ -91,6 +97,8 @@ enum ServerSetup {
                  "-p", String(c.sshPort)]
         let iface = c.interface.trimmingCharacters(in: .whitespaces)
         if !iface.isEmpty { a += ["-o", "BindInterface=\(iface)"] }
+        a += shared ? ["-o", "ControlMaster=auto", "-o", "ControlPath=\(controlPath)", "-o", "ControlPersist=60"]
+                    : ["-o", "ControlPath=none"]
         switch auth {
         case .key(let path):
             a += ["-o", "BatchMode=yes", "-o", "PreferredAuthentications=publickey"]
@@ -122,12 +130,19 @@ enum ServerSetup {
                            "DISPLAY": ":0", "PT_ASKPASS_SECRET": pw])
     }
 
-    /// Команда на сервере от имени админа: stdin — текст скрипта или nil.
+    /// Команда на сервере от имени админа: stdin — текст скрипта или nil. По умолчанию — через общее соединение.
     static func exec(_ c: Config, admin: String, auth: AdminAuth, _ cmd: String, stdin: String? = nil,
-                     timeout: Double = 600) async -> (Int32, String) {
+                     shared: Bool = true, timeout: Double = 600) async -> (Int32, String) {
         await withPassword(auth) { env in
-            await runSSH(baseArgs(c, auth: auth) + ["\(admin)@\(c.hostTrimmed)", cmd], env: env, stdin: stdin, timeout: timeout)
+            await runSSH(baseArgs(c, auth: auth, shared: shared) + ["\(admin)@\(c.hostTrimmed)", cmd],
+                         env: env, stdin: stdin, timeout: timeout)
         }
+    }
+
+    /// Закрывает общее соединение (после настройки по паролю оно не должно висеть).
+    static func closeShared(_ c: Config, admin: String) async {
+        _ = await runSSH(["-F", "none", "-o", "ControlPath=\(controlPath)", "-p", String(c.sshPort),
+                          "-O", "exit", "\(admin)@\(c.hostTrimmed)"], timeout: 10)
     }
 
     /// Понятная причина отказа ssh.
@@ -140,7 +155,10 @@ enum ServerSetup {
             return "Сервер требует сменить пароль при первом входе. Войдите один раз через консоль хостинга, смените пароль и повторите."
         }
         if s.contains("permission denied") { return "Вход не прошёл: неверный логин, пароль или ключ." }
-        if s.contains("timed out") || s.contains("no route") || s.contains("connection refused")
+        if s.contains("connection refused") {
+            return "Сервер отклонил подключение к ssh. Если перед этим было много подключений подряд, подождите полминуты и повторите (на сервере может стоять ограничение частоты подключений); иначе проверьте порт."
+        }
+        if s.contains("timed out") || s.contains("no route")
             || s.contains("could not resolve") || s.contains("network is unreachable") {
             return "Сервер не отвечает по ssh: проверьте адрес и порт."
         }
@@ -160,9 +178,11 @@ enum ServerSetup {
     }
 
     /// Пробует войти и узнать, хватит ли прав на настройку.
-    static func probe(_ c: Config, admin: String, auth: AdminAuth) async -> ProbeResult {
+    /// shared = false — отдельный вход: так проверяется, что пускает именно этот ключ или пароль.
+    /// shared = true — удачный вход остаётся общим соединением для следующих команд настройки.
+    static func probe(_ c: Config, admin: String, auth: AdminAuth, shared: Bool = false) async -> ProbeResult {
         let cmd = "if [ \"$(id -u)\" = 0 ]; then echo PT-ROOT; elif sudo -n true 2>/dev/null; then echo PT-SUDO; else echo PT-NOSUDO; fi"
-        let (code, out) = await exec(c, admin: admin, auth: auth, cmd, timeout: 40)
+        let (code, out) = await exec(c, admin: admin, auth: auth, cmd, shared: shared, timeout: 40)
         if out.contains("PT-ROOT") { return .root }
         if out.contains("PT-SUDO") { return .sudo }
         if out.contains("PT-NOSUDO") { return .noSudo }

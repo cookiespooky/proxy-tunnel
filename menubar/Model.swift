@@ -394,12 +394,20 @@ final class Model: ObservableObject {
         guard let pub = publicKey(for: c.keyPath) else { setupStep(0, false, "Нет файла \(c.keyPath).pub"); return }
         setupStep(0, true, (c.keyPath as NSString).abbreviatingWithTildeInPath)
 
-        // 2. вход: сначала ключ — если он уже на сервере, пароль не нужен
+        // 2. вход: сначала ключ — если он уже на сервере, пароль не нужен.
+        // Удачный вход становится общим соединением для всех команд настройки (shared: true): на сервере
+        // может стоять ограничение частоты подключений, а их иначе было бы пять-шесть за полминуты.
+        let hostForClose = c
+        defer { Task { await ServerSetup.closeShared(hostForClose, admin: admin) } }
         var auth = c.adminAuth
-        var probe = await ServerSetup.probe(c, admin: admin, auth: auth)
+        var probe = ProbeResult.denied
+        // Фоновая проверка уже сказала, что ключа нет, и пароль введён — лишнее подключение не нужно.
+        if !(access == .needPassword && !password.isEmpty) {
+            probe = await ServerSetup.probe(c, admin: admin, auth: auth, shared: true)
+        }
         if probe == .denied && !password.isEmpty {
             auth = .password(password)
-            probe = await ServerSetup.probe(c, admin: admin, auth: auth)
+            probe = await ServerSetup.probe(c, admin: admin, auth: auth, shared: true)
         }
         var byPassword = false
         if case .password = auth { byPassword = true }
@@ -504,7 +512,7 @@ final class Model: ObservableObject {
                 if case .failed(let e) = r { fail = e } else if r == .denied { fail = "ключ не подошёл" } else { fail = "нет прав root" }
                 break
             }
-            if i < 2 { try? await Task.sleep(nanoseconds: 1_000_000_000) }
+            if i < 2 { try? await Task.sleep(nanoseconds: 2_000_000_000) }   // не упереться в ограничение частоты
         }
         keyStable = ok == 3
         access = keyStable == true ? .key(root: adminIsRoot) : access

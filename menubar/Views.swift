@@ -385,10 +385,14 @@ struct SettingsView: View {
                 .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         HStack {
-            Button("Настроить сервер") { hostEmpty ? showHostMissing() : runSetup() }
+            Button { hostEmpty ? showHostMissing() : runSetup() } label: {
+                HStack(spacing: 6) {
+                    if m.setupBusy { ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 14, height: 14) }
+                    Text(m.setupBusy ? "Настраиваю…" : "Настроить сервер")
+                }
+            }
                 .buttonStyle(.borderedProminent)
                 .disabled(!hostEmpty && !canSetup)
-            if m.setupBusy { ProgressView().controlSize(.small) }
         }
         if !m.setupSteps.isEmpty {
             VStack(spacing: 0) { ForEach(m.setupSteps) { StepRow(step: $0) } }
@@ -435,7 +439,7 @@ struct SettingsView: View {
                 Button("Проверить соединение") { Task { await m.checkConnection() } }
                 Button("Выключить вход по паролю") { Task { await m.disablePasswordLogin() } }
                     .disabled(m.keyStable != true || m.passwordLogin == false)
-                if m.accessBusy { ProgressView().controlSize(.small) }
+                if m.accessBusy { ProgressView().controlSize(.small).padding(.leading, 6) }
             }
             .disabled(m.accessBusy)
             if m.keyStable == false || (m.access == .needPassword && !m.setupBusy) {
