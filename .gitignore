@@ -1,0 +1,9 @@
+build/
+menubar/build/
+.DS_Store
+# у каждого пользователя свои — не в репо
+config.json
+known_hosts
+id_ed25519*
+*.key
+vless.txt

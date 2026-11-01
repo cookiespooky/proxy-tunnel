@@ -1,0 +1,153 @@
+// Настройки приложения: ~/Library/Application Support/Proxy Tunnel/config.json
+import Foundation
+
+struct Config: Codable, Equatable {
+    var host = ""
+    var sshPort = 22
+    var user = "tunnel"
+    var keyPath = ""
+    var localPort = 8888      // порт туннеля на Маке
+    var remotePort = 8888     // порт прокси на сервере
+    var pacPort = 8889
+    var interface = "en0"
+    var networkService = "Wi-Fi"
+    var domains = ["claude.ai", "claude.com", "anthropic.com", "claudeusercontent.com", "claude.site",
+                   "threads.net", "threads.com"]
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Config()
+        host = try c.decodeIfPresent(String.self, forKey: .host) ?? d.host
+        sshPort = try c.decodeIfPresent(Int.self, forKey: .sshPort) ?? d.sshPort
+        user = try c.decodeIfPresent(String.self, forKey: .user) ?? d.user
+        keyPath = try c.decodeIfPresent(String.self, forKey: .keyPath) ?? d.keyPath
+        localPort = try c.decodeIfPresent(Int.self, forKey: .localPort) ?? d.localPort
+        remotePort = try c.decodeIfPresent(Int.self, forKey: .remotePort) ?? d.remotePort
+        pacPort = try c.decodeIfPresent(Int.self, forKey: .pacPort) ?? d.pacPort
+        interface = try c.decodeIfPresent(String.self, forKey: .interface) ?? d.interface
+        networkService = try c.decodeIfPresent(String.self, forKey: .networkService) ?? d.networkService
+        domains = try c.decodeIfPresent([String].self, forKey: .domains) ?? d.domains
+    }
+
+    static let supportDir: URL = {
+        let u = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Proxy Tunnel")
+        try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
+        return u
+    }()
+    static var fileURL: URL { supportDir.appendingPathComponent("config.json") }
+    static var knownHostsURL: URL { supportDir.appendingPathComponent("known_hosts") }
+    static var defaultKeyPath: String { supportDir.appendingPathComponent("id_ed25519").path }
+    static var logURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Proxy Tunnel.log")
+    }
+
+    static func load() -> Config {
+        var c = (try? Data(contentsOf: fileURL)).flatMap { try? JSONDecoder().decode(Config.self, from: $0) } ?? Config()
+        if c.keyPath.isEmpty { c.keyPath = defaultKeyPath }
+        return c
+    }
+
+    func save() throws {
+        let e = JSONEncoder()
+        e.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try e.encode(self).write(to: Config.fileURL, options: .atomic)
+    }
+
+    var hostTrimmed: String { host.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var keyExists: Bool { FileManager.default.fileExists(atPath: keyPath) }
+    var isComplete: Bool { !hostTrimmed.isEmpty && keyExists }
+    var proxyURL: String { "http://127.0.0.1:\(localPort)" }
+    var pacURL: String { "http://127.0.0.1:\(pacPort)/proxy.pac" }
+    var forwardSpec: String { "127.0.0.1:\(localPort):127.0.0.1:\(remotePort)" }
+
+    var cleanDomains: [String] {
+        domains.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .map { $0.hasPrefix(".") ? String($0.dropFirst()) : $0 }
+            .filter { !$0.isEmpty && !$0.contains(" ") && !$0.contains("\"") }
+    }
+
+    /// PAC без запасного DIRECT: нет туннеля — нет соединения с этими доменами.
+    var pacText: String {
+        let list = cleanDomains.map { "\"\($0)\"" }.joined(separator: ", ")
+        return """
+        // Proxy Tunnel: эти домены идут через туннель, остальное напрямую.
+        function FindProxyForURL(url, host) {
+          var viaTunnel = [\(list)];
+          for (var i = 0; i < viaTunnel.length; i++) {
+            if (host == viaTunnel[i] || dnsDomainIs(host, "." + viaTunnel[i])) {
+              return "PROXY 127.0.0.1:\(localPort)";
+            }
+          }
+          return "DIRECT";
+        }
+
+        """
+    }
+
+    /// Скрипт для сервера (Ubuntu/Debian), выполняется один раз под root.
+    func serverScript(publicKey: String) -> String {
+        """
+        sudo bash <<'PROXYTUNNEL'
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq tinyproxy >/dev/null
+        cat > /etc/tinyproxy/tinyproxy.conf <<'CONF'
+        User tinyproxy
+        Group tinyproxy
+        Port \(remotePort)
+        Listen 127.0.0.1
+        Timeout 600
+        LogLevel Warning
+        Syslog On
+        MaxClients 200
+        Allow 127.0.0.1
+        ConnectPort 443
+        ConnectPort 80
+        DisableViaHeader Yes
+        CONF
+        systemctl enable -q tinyproxy
+        systemctl restart tinyproxy
+        id \(user) >/dev/null 2>&1 || useradd -m -s /usr/sbin/nologin \(user)
+        install -d -m 700 -o \(user) -g \(user) /home/\(user)/.ssh
+        touch /home/\(user)/.ssh/authorized_keys
+        echo 'restrict,port-forwarding,permitopen="127.0.0.1:\(remotePort)" \(publicKey)' >> /home/\(user)/.ssh/authorized_keys
+        sort -u -o /home/\(user)/.ssh/authorized_keys /home/\(user)/.ssh/authorized_keys
+        chown \(user):\(user) /home/\(user)/.ssh/authorized_keys
+        chmod 600 /home/\(user)/.ssh/authorized_keys
+        cat > /etc/ssh/sshd_config.d/10-proxy-tunnel.conf <<'CONF'
+        Match User \(user)
+          AllowTcpForwarding local
+          PermitTTY no
+          X11Forwarding no
+          AllowAgentForwarding no
+          PermitTunnel no
+          GatewayPorts no
+          ForceCommand /usr/sbin/nologin
+        CONF
+        sshd -t
+        systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+        echo "Proxy Tunnel: сервер готов"
+        PROXYTUNNEL
+        """
+    }
+}
+
+enum Log {
+    private static let q = DispatchQueue(label: "log")
+    static func append(_ s: String) {
+        q.async {
+            let url = Config.logURL
+            let stamp = ISO8601DateFormatter().string(from: Date())
+            let line = Data(s.split(separator: "\n").map { "\(stamp) \($0)\n" }.joined().utf8)
+            if let h = try? FileHandle(forWritingTo: url) {
+                h.seekToEndOfFile(); h.write(line); try? h.close()
+            } else {
+                try? line.write(to: url)
+            }
+        }
+    }
+}
