@@ -167,44 +167,58 @@ struct PanelView: View {
     }
 }
 
+enum SetupTab: String { case password, key, manual }
+
 struct SettingsView: View {
     @ObservedObject var m: Model
     @State private var draft = Config()
     @State private var domainsText = ""
     @State private var note = ""
     @State private var keyExists = false
+    @State private var tab = SetupTab.password
+    @State private var admin = "root"
+    @State private var password = ""
+    @State private var adminKey: String?
 
     private let plainInt = IntegerFormatStyle<Int>().grouping(.never)
 
     var body: some View {
         Form {
             Section {
-                Text(draft.keyPath).font(.caption).textSelection(.enabled)
-                HStack {
-                    if !keyExists {
-                        Button("Создать ключ") { createKey() }.buttonStyle(.borderedProminent)
-                    }
-                    Button("Скопировать публичный ключ") { copyPublicKey() }.disabled(!keyExists)
-                    Button("Выбрать…") { chooseKey() }
-                }
-                Text(keyExists ? "Ключ на месте." : "Ключа ещё нет — создайте его. Он нужен, чтобы входить на сервер без пароля.")
-                    .font(.caption).foregroundColor(keyExists ? .secondary : Palette.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            } header: { StepHeader(n: 1, title: "Ключ SSH", done: keyExists) }
-
-            Section {
-                Text("Нужен сервер на Ubuntu или Debian. Скопируйте команду, войдите на сервер под root (консоль в панели хостинга или ssh) и вставьте её. Она поставит прокси, доступный только через туннель, и пользователя «\(draft.user)», которому разрешён только туннель. Дождитесь строки «сервер готов».")
-                    .font(.caption).fixedSize(horizontal: false, vertical: true)
-                Button("Скопировать команду для сервера") { copyServerScript() }.disabled(!keyExists)
-            } header: { StepHeader(n: 2, title: "Настройка сервера (один раз)", done: false, optionalDone: true) }
-
-            Section {
                 TextField("Адрес сервера", text: $draft.host, prompt: Text("IP или домен"))
                 TextField("SSH-порт", value: $draft.sshPort, format: plainInt)
-                TextField("Пользователь", text: $draft.user)
-                Text("Затем «Сохранить» внизу и в окошке значка переключите на «Туннель».")
-                    .font(.caption).foregroundColor(.secondary)
-            } header: { StepHeader(n: 3, title: "Подключение", done: m.config.isComplete) }
+            } header: { StepHeader(n: 1, title: "Сервер", done: m.config.isComplete) }
+
+            Section {
+                Picker("", selection: $tab) {
+                    Text("Пароль").tag(SetupTab.password)
+                    Text("Ключ на сервере").tag(SetupTab.key)
+                    Text("Вручную").tag(SetupTab.manual)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                switch tab {
+                case .password: passwordTab
+                case .key: keyTab
+                case .manual: manualTab
+                }
+
+                if tab != .manual && !m.setupSteps.isEmpty {
+                    VStack(spacing: 0) {
+                        ForEach(m.setupSteps) { StepRow(step: $0) }
+                    }
+                    if m.setupDone {
+                        if m.mode == "tunnel" {
+                            Text("Готово. Туннель включён — перезапустите Claude, если он открыт.")
+                                .font(.caption).foregroundColor(Palette.green)
+                        } else {
+                            Button("Включить туннель для Claude") { m.setMode("tunnel") }
+                                .buttonStyle(.borderedProminent)
+                        }
+                    }
+                }
+            } header: { StepHeader(n: 2, title: "Настройка сервера (один раз)", done: m.setupDone) }
 
             Section("Через туннель") {
                 TextEditor(text: $domainsText)
@@ -215,6 +229,15 @@ struct SettingsView: View {
             }
 
             Section("Дополнительно") {
+                TextField("Пользователь туннеля", text: $draft.user)
+                LabeledContent("Ключ туннеля") {
+                    Text((draft.keyPath as NSString).abbreviatingWithTildeInPath)
+                        .font(.caption).textSelection(.enabled)
+                }
+                HStack {
+                    Button("Скопировать публичный ключ") { copyPublicKey() }.disabled(!keyExists)
+                    Button("Выбрать…") { if let p = pickKey() { draft.keyPath = p; keyExists = draft.keyExists } }
+                }
                 TextField("Интерфейс", text: $draft.interface, prompt: Text("en0 — Wi-Fi"))
                 TextField("Сетевая служба macOS", text: $draft.networkService)
                 TextField("Порт туннеля на Маке", value: $draft.localPort, format: plainInt)
@@ -251,9 +274,66 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 480)
+        .frame(width: 500)
         .onAppear { load() }
         .onReceive(NotificationCenter.default.publisher(for: SettingsWindow.shown)) { _ in load() }
+        .onChange(of: m.setupNeedsPassword) { need in if need { tab = .password } }
+    }
+
+    // MARK: вкладки
+
+    private var hostEmpty: Bool { draft.hostTrimmed.isEmpty }
+
+    @ViewBuilder private var passwordTab: some View {
+        Text("Приложение само зайдёт на сервер (Ubuntu или Debian), поставит прокси и заведёт пользователя, которому разрешён только туннель. Если ваш SSH-ключ уже на сервере, пароль не понадобится. Пароль нигде не сохраняется.")
+            .font(.caption).fixedSize(horizontal: false, vertical: true)
+        TextField("Логин", text: $admin)
+        SecureField("Пароль", text: $password)
+        setupButton("Настроить сервер")
+    }
+
+    @ViewBuilder private var keyTab: some View {
+        Text("Если при создании сервера вы добавили на него свой SSH-ключ: приложение войдёт по нему, без пароля.")
+            .font(.caption).fixedSize(horizontal: false, vertical: true)
+        TextField("Логин", text: $admin)
+        LabeledContent("Ключ для входа") {
+            HStack {
+                Text(adminKey.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "из ~/.ssh и агента")
+                    .font(.caption).foregroundColor(.secondary)
+                Button("Выбрать…") { if let p = pickKey() { adminKey = p } }
+                if adminKey != nil { Button("Сбросить") { adminKey = nil } }
+            }
+        }
+        setupButton("Проверить и настроить")
+    }
+
+    @ViewBuilder private var manualTab: some View {
+        Text("Если приложению на сервер не зайти (вход только через консоль хостинга): скопируйте команду, вставьте её в консоль сервера под root или пользователем с sudo и дождитесь строки «сервер готов». Затем «Сохранить» внизу.")
+            .font(.caption).fixedSize(horizontal: false, vertical: true)
+        HStack {
+            if !keyExists { Button("Создать ключ туннеля") { createKey() }.buttonStyle(.borderedProminent) }
+            Button("Скопировать команду для сервера") { copyServerScript() }.disabled(!keyExists)
+        }
+    }
+
+    private func setupButton(_ title: String) -> some View {
+        HStack {
+            Button(title) { runSetup() }
+                .buttonStyle(.borderedProminent)
+                .disabled(hostEmpty || m.setupBusy)
+            if m.setupBusy { ProgressView().controlSize(.small) }
+            if hostEmpty { Text("Сначала адрес сервера").font(.caption).foregroundColor(.secondary) }
+        }
+    }
+
+    // MARK: действия
+
+    private func currentDraft() -> Config {
+        var c = draft
+        c.host = c.hostTrimmed
+        c.domains = domainsText.split(separator: "\n").map(String.init)
+        c.domains = c.cleanDomains
+        return c
     }
 
     private func load() {
@@ -264,20 +344,29 @@ struct SettingsView: View {
     }
 
     private func save() {
-        var c = draft
-        c.host = c.hostTrimmed
-        c.domains = domainsText.split(separator: "\n").map(String.init)
-        c.domains = c.cleanDomains
+        let c = currentDraft()
         m.apply(c)
         domainsText = c.domains.joined(separator: "\n")
         note = c.isComplete ? "Сохранено. Туннель переподключается." : "Сохранено. Для подключения нужны адрес и ключ."
     }
 
+    private func runSetup() {
+        let c = currentDraft()
+        let pw = tab == .password ? password : ""
+        let key = tab == .key ? adminKey : nil
+        note = ""
+        Task {
+            await m.setupServer(c, admin: admin, password: pw, adminKey: key)
+            if m.setupDone { password = "" }
+            draft = m.config
+            keyExists = draft.keyExists
+        }
+    }
+
     private func createKey() {
         let path = draft.keyPath
         Task {
-            var c = m.config; c.keyPath = path; m.config = c
-            if let e = await m.generateKey() { note = "Ключ не создан: \(e)" }
+            if let e = await m.generateKey(at: path) { note = "Ключ не создан: \(e)" }
             keyExists = FileManager.default.fileExists(atPath: path)
             if keyExists { note = "Ключ создан. Теперь скопируйте команду для сервера." }
         }
@@ -292,12 +381,16 @@ struct SettingsView: View {
 
     private func copyServerScript() {
         guard let k = m.publicKey(for: draft.keyPath) else { note = "Нет файла \(draft.keyPath).pub"; return }
+        guard let cmd = ServerScript.manualCommand(currentDraft(), publicKey: k) else {
+            note = "В приложении нет скрипта сервера — пересоберите его build.sh."; return
+        }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(draft.serverScript(publicKey: k), forType: .string)
-        note = "Команда скопирована. Вставьте её в консоль сервера под root, дождитесь «сервер готов», затем «Сохранить»."
+        NSPasteboard.general.setString(cmd, forType: .string)
+        note = "Команда скопирована. Вставьте её в консоль сервера, дождитесь «сервер готов», затем «Сохранить»."
     }
 
-    private func chooseKey() {
+    /// Выбор закрытого ключа (не .pub); nil — отменили.
+    private func pickKey() -> String? {
         let p = NSOpenPanel()
         p.canChooseFiles = true
         p.canChooseDirectories = false
@@ -305,10 +398,8 @@ struct SettingsView: View {
         p.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh")
         p.message = "Выберите закрытый ключ (не .pub)"
         NSApp.activate(ignoringOtherApps: true)
-        if p.runModal() == .OK, let u = p.url {
-            draft.keyPath = u.path.hasSuffix(".pub") ? String(u.path.dropLast(4)) : u.path
-            keyExists = draft.keyExists
-        }
+        guard p.runModal() == .OK, let u = p.url else { return nil }
+        return u.path.hasSuffix(".pub") ? String(u.path.dropLast(4)) : u.path
     }
 }
 

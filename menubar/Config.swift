@@ -86,54 +86,6 @@ struct Config: Codable, Equatable {
 
         """
     }
-
-    /// Скрипт для сервера (Ubuntu/Debian), выполняется один раз под root.
-    func serverScript(publicKey: String) -> String {
-        """
-        sudo bash <<'PROXYTUNNEL'
-        set -e
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq
-        apt-get install -y -qq tinyproxy >/dev/null
-        cat > /etc/tinyproxy/tinyproxy.conf <<'CONF'
-        User tinyproxy
-        Group tinyproxy
-        Port \(remotePort)
-        Listen 127.0.0.1
-        Timeout 600
-        LogLevel Warning
-        Syslog On
-        MaxClients 200
-        Allow 127.0.0.1
-        ConnectPort 443
-        ConnectPort 80
-        DisableViaHeader Yes
-        CONF
-        systemctl enable -q tinyproxy
-        systemctl restart tinyproxy
-        id \(user) >/dev/null 2>&1 || useradd -m -s /usr/sbin/nologin \(user)
-        install -d -m 700 -o \(user) -g \(user) /home/\(user)/.ssh
-        touch /home/\(user)/.ssh/authorized_keys
-        echo 'restrict,port-forwarding,permitopen="127.0.0.1:\(remotePort)" \(publicKey)' >> /home/\(user)/.ssh/authorized_keys
-        sort -u -o /home/\(user)/.ssh/authorized_keys /home/\(user)/.ssh/authorized_keys
-        chown \(user):\(user) /home/\(user)/.ssh/authorized_keys
-        chmod 600 /home/\(user)/.ssh/authorized_keys
-        cat > /etc/ssh/sshd_config.d/10-proxy-tunnel.conf <<'CONF'
-        Match User \(user)
-          AllowTcpForwarding local
-          PermitTTY no
-          X11Forwarding no
-          AllowAgentForwarding no
-          PermitTunnel no
-          GatewayPorts no
-          ForceCommand /usr/sbin/nologin
-        CONF
-        sshd -t
-        systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
-        echo "Proxy Tunnel: сервер готов"
-        PROXYTUNNEL
-        """
-    }
 }
 
 enum Log {

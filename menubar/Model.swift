@@ -319,10 +319,106 @@ final class Model: ObservableObject {
         verdictOK = ok
     }
 
+    // MARK: настройка сервера из приложения
+
+    @Published var setupSteps: [Step] = []
+    @Published var setupBusy = false
+    @Published var setupDone = false
+    /// Ключ не подошёл — нужен пароль (окно настроек показывает поле и переключает вкладку).
+    @Published var setupNeedsPassword = false
+
+    private func setupStep(_ i: Int, _ ok: Bool, _ detail: String = "") {
+        setupSteps[i].state = ok ? .ok : .fail
+        setupSteps[i].detail = detail
+        if ok && i + 1 < setupSteps.count { setupSteps[i + 1].state = .running }
+    }
+
+    /// Всё за один проход: ключ туннеля → вход админом → скрипт сервера → сохранить настройки → туннель отвечает.
+    /// password пустой — только ключ: adminKey или ключи по умолчанию из ~/.ssh и агента.
+    /// С паролем сначала всё равно пробуется ключ: если он уже на сервере, пароль не нужен.
+    func setupServer(_ draft: Config, admin: String, password: String, adminKey: String?) async {
+        guard !setupBusy else { return }
+        setupBusy = true
+        setupDone = false
+        setupNeedsPassword = false
+        defer { setupBusy = false }
+        setupSteps = makeSteps(["Ключ туннеля", "Вход на сервер", "Прокси на сервере", "Туннель работает"])
+        setupSteps[0].state = .running
+        var c = draft
+        c.host = c.hostTrimmed
+        if c.keyPath.isEmpty { c.keyPath = Config.defaultKeyPath }
+        let admin = admin.trimmingCharacters(in: .whitespaces).isEmpty ? "root" : admin.trimmingCharacters(in: .whitespaces)
+        guard !c.host.isEmpty else { setupStep(0, false, "Укажите адрес сервера"); return }
+
+        // 1. ключ туннеля
+        if let e = await generateKey(at: c.keyPath) { setupStep(0, false, "Не создан: \(e)"); return }
+        guard let pub = publicKey(for: c.keyPath) else { setupStep(0, false, "Нет файла \(c.keyPath).pub"); return }
+        setupStep(0, true, (c.keyPath as NSString).abbreviatingWithTildeInPath)
+
+        // 2. вход: ключ, затем пароль
+        var auth = AdminAuth.key(adminKey)
+        var probe = await ServerSetup.probe(c, admin: admin, auth: auth)
+        var how = "по ключу"
+        if probe == .denied && !password.isEmpty {
+            auth = .password(password)
+            probe = await ServerSetup.probe(c, admin: admin, auth: auth)
+            how = "по паролю"
+        }
+        switch probe {
+        case .root: setupStep(1, true, "\(admin) \(how)")
+        case .sudo: setupStep(1, true, "\(admin) \(how), через sudo")
+        case .noSudo:
+            setupStep(1, false, "\(admin) вошёл, но без sudo без пароля. Войдите под root.")
+            return
+        case .denied:
+            if password.isEmpty {
+                setupNeedsPassword = true
+                setupStep(1, false, "Ключа для \(admin) на сервере нет — введите пароль.")
+            } else {
+                setupStep(1, false, "Пароль не подошёл.")
+            }
+            return
+        case .failed(let e): setupStep(1, false, e); return
+        }
+
+        // 3. скрипт сервера
+        if let e = await ServerSetup.install(c, admin: admin, auth: auth, root: probe == .root, publicKey: pub) {
+            setupStep(2, false, e)
+            return
+        }
+        setupStep(2, true, "tinyproxy на 127.0.0.1:\(c.remotePort), пользователь \(c.user)")
+
+        // 4. сохранить и дождаться туннеля
+        apply(c)
+        var ip = "", loc = ""
+        for _ in 0..<10 {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            (ip, loc) = await traceViaTunnel()
+            if !ip.isEmpty { break }
+        }
+        if !ip.isEmpty && loc != "RU" {
+            setupStep(3, true, "выход: \(ip), \(loc)")
+            setupDone = true
+        } else {
+            let why = tunnel.lastError.isEmpty ? "нет ответа через туннель" : tunnel.lastError
+            setupStep(3, false, ip.isEmpty ? why : "выход \(ip), \(loc) — это Россия")
+        }
+    }
+
+    func traceViaTunnel() async -> (String, String) {
+        let (_, trace) = await run(["/usr/bin/curl", "-s", "-x", config.proxyURL, "--max-time", "8",
+                                    "https://claude.ai/cdn-cgi/trace"])
+        var ip = "", loc = ""
+        for line in trace.split(separator: "\n") {
+            if line.hasPrefix("ip=") { ip = String(line.dropFirst(3)) }
+            if line.hasPrefix("loc=") { loc = String(line.dropFirst(4)) }
+        }
+        return (ip, loc)
+    }
+
     // MARK: ключ и прочее
 
-    func generateKey() async -> String? {
-        let path = config.keyPath
+    func generateKey(at path: String) async -> String? {
         guard !FileManager.default.fileExists(atPath: path) else { return nil }
         try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
                                                  withIntermediateDirectories: true)
