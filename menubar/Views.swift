@@ -218,6 +218,9 @@ struct SettingsView: View {
     @State private var password = ""
     @State private var makeAdminKey = true
     @State private var accessPassword = ""
+    @State private var flashHost = false
+    @State private var confirmForget = false
+    @FocusState private var hostFocused: Bool
 
     private let plainInt = IntegerFormatStyle<Int>().grouping(.never)
 
@@ -225,6 +228,10 @@ struct SettingsView: View {
         Form {
             Section {
                 TextField("Адрес сервера", text: $draft.host, prompt: Text("IP или домен"))
+                    .focused($hostFocused)
+                    .padding(.vertical, 2)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Palette.red.opacity(flashHost ? 0.18 : 0)))
+                    .animation(.easeInOut(duration: 0.25), value: flashHost)
                 TextField("SSH-порт", value: $draft.sshPort, format: plainInt)
                 if m.config.hostTrimmed.isEmpty {
                     HStack {
@@ -263,20 +270,12 @@ struct SettingsView: View {
 
             Section("Дополнительно") {
                 TextField("Пользователь туннеля", text: $draft.user)
-                LabeledContent("Ключ туннеля") {
-                    Text((draft.keyPath as NSString).abbreviatingWithTildeInPath)
-                        .font(.caption).textSelection(.enabled)
-                }
-                HStack {
-                    Button("Скопировать публичный ключ") { copyPublicKey() }.disabled(!keyExists)
-                    Button("Выбрать…") { if let p = pickKey() { draft.keyPath = p; keyExists = draft.keyExists } }
-                }
                 TextField("Интерфейс", text: $draft.interface, prompt: Text("en0 — Wi-Fi"))
                 TextField("Сетевая служба macOS", text: $draft.networkService)
                 TextField("Порт туннеля на Маке", value: $draft.localPort, format: plainInt)
                 TextField("Порт прокси на сервере", value: $draft.remotePort, format: plainInt)
                 TextField("Порт PAC", value: $draft.pacPort, format: plainInt)
-                Button("Забыть ключ сервера") { m.forgetHostKey(); note = m.message }
+                Button("Забыть ключ сервера…") { confirmForget = true }
             }
 
             if !note.isEmpty {
@@ -310,6 +309,12 @@ struct SettingsView: View {
         .frame(minWidth: 500, idealWidth: 500, maxWidth: 500, minHeight: 420, idealHeight: 760, maxHeight: .infinity)
         .onAppear { load() }
         .onReceive(NotificationCenter.default.publisher(for: SettingsWindow.shown)) { _ in load() }
+        .alert("Забыть ключ сервера?", isPresented: $confirmForget) {
+            Button("Забыть", role: .destructive) { m.forgetHostKey(); note = m.message }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Это нужно, только если сервер переустановили и приложение пишет, что ключ сервера изменился. При следующем подключении приложение примет ключ сервера заново — если в этот момент кто-то подменит сервер, подмену оно не заметит.")
+        }
         // Фоновая проверка входа по ключу: через секунду после того, как адрес, порт, логин или ключ перестали меняться.
         .task(id: "\(draft.hostTrimmed)|\(draft.sshPort)|\(draft.adminTrimmed)|\(draft.adminKey)") {
             try? await Task.sleep(nanoseconds: 900_000_000)
@@ -321,6 +326,17 @@ struct SettingsView: View {
     // MARK: настройка
 
     private var needPassword: Bool { m.access == .needPassword }
+    private var hostEmpty: Bool { draft.hostTrimmed.isEmpty }
+
+    /// «Настроить сервер» без адреса: коротко подсветить поле адреса и поставить в него курсор.
+    private func showHostMissing() {
+        hostFocused = true
+        flashHost = true
+        Task {
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            flashHost = false
+        }
+    }
 
     private var canSetup: Bool {
         guard !draft.hostTrimmed.isEmpty, !m.setupBusy else { return false }
@@ -334,8 +350,7 @@ struct SettingsView: View {
     @ViewBuilder private var accessRow: some View {
         switch m.access {
         case .idle:
-            Text("Впишите адрес — приложение проверит, пускает ли сервер по вашему SSH-ключу.")
-                .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            EmptyView()
         case .checking:
             HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Проверяю вход по ключу…").font(.caption) }
         case .key(let root):
@@ -365,25 +380,11 @@ struct SettingsView: View {
             Toggle("Создать ключ для входа и добавить его на сервер", isOn: $makeAdminKey)
             Text("Тогда в следующий раз пароль не понадобится, а вход по паролю можно будет выключить. Пароль нигде не сохраняется.")
                 .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-        } else {
-            DisclosureGroup("Другой логин или свой ключ") {
-                TextField("Логин", text: $draft.adminUser)
-                LabeledContent("Ключ") {
-                    HStack {
-                        Text(draft.adminKey.isEmpty ? "из ~/.ssh и агента" : (draft.adminKey as NSString).abbreviatingWithTildeInPath)
-                            .font(.caption).foregroundColor(.secondary)
-                        Button("Выбрать…") { if let p = pickKey() { draft.adminKey = p } }
-                        if !draft.adminKey.isEmpty { Button("Сбросить") { draft.adminKey = "" } }
-                    }
-                }
-                Text("Не root — нужен sudo без пароля.").font(.caption).foregroundColor(.secondary)
-            }
-            .font(.caption)
         }
         HStack {
-            Button("Настроить сервер") { runSetup() }
+            Button("Настроить сервер") { hostEmpty ? showHostMissing() : runSetup() }
                 .buttonStyle(.borderedProminent)
-                .disabled(!canSetup)
+                .disabled(!hostEmpty && !canSetup)
             if m.setupBusy { ProgressView().controlSize(.small) }
         }
         if !m.setupSteps.isEmpty {
@@ -501,13 +502,6 @@ struct SettingsView: View {
         }
     }
 
-    private func copyPublicKey() {
-        guard let k = m.publicKey(for: draft.keyPath) else { note = "Нет файла \(draft.keyPath).pub"; return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(k, forType: .string)
-        note = "Публичный ключ скопирован."
-    }
-
     private func copyServerScript() {
         guard let k = m.publicKey(for: draft.keyPath) else { note = "Нет файла \(draft.keyPath).pub"; return }
         guard let cmd = ServerScript.manualCommand(currentDraft(), publicKey: k) else {
@@ -518,18 +512,6 @@ struct SettingsView: View {
         note = "Команда скопирована. Вставьте её в консоль сервера, дождитесь «сервер готов», затем «Сохранить»."
     }
 
-    /// Выбор закрытого ключа (не .pub); nil — отменили.
-    private func pickKey() -> String? {
-        let p = NSOpenPanel()
-        p.canChooseFiles = true
-        p.canChooseDirectories = false
-        p.showsHiddenFiles = true
-        p.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh")
-        p.message = "Выберите закрытый ключ (не .pub)"
-        NSApp.activate(ignoringOtherApps: true)
-        guard p.runModal() == .OK, let u = p.url else { return nil }
-        return u.path.hasSuffix(".pub") ? String(u.path.dropLast(4)) : u.path
-    }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
