@@ -119,6 +119,9 @@ final class Model: ObservableObject {
     @Published var checkedAt: Date?
     private var work: [Step] = []
     private var quiet = false
+    /// Последняя версия по словам сервера обновлений; новее установленной — в панели строка «Доступна версия…».
+    @Published var latestVersion: String? = Update.knownLatest
+    private var pingFailedAt = Date.distantPast
     let tunnel = Tunnel()
     let pac = PacServer()
 
@@ -135,10 +138,31 @@ final class Model: ObservableObject {
             }
         }
         Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            self?.maybePing()
             while true {
                 try? await Task.sleep(nanoseconds: 120_000_000_000)
                 guard let self else { return }
                 self.refresh(quiet: true)
+                self.maybePing()
+            }
+        }
+    }
+
+    var updateAvailable: String? {
+        guard let v = latestVersion, !v.isEmpty, Update.isNewer(v, than: Update.version) else { return nil }
+        return v
+    }
+
+    /// Спросить о новой версии (и отметиться, если статистика включена), когда пора; сервер не ответил — через полчаса.
+    func maybePing() {
+        let on = enabled && verdictOK
+        guard Update.due(tunnelOn: on), Date().timeIntervalSince(pingFailedAt) > 1800 else { return }
+        Task {
+            if let v = await Update.ping(tunnelOn: on) {
+                latestVersion = v
+            } else {
+                pingFailedAt = Date()
             }
         }
     }
@@ -311,6 +335,7 @@ final class Model: ObservableObject {
             checkedAt = Date()
             checking = false
             busy = false
+            maybePing()
         }
     }
 

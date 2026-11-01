@@ -68,6 +68,11 @@ public sealed class Config
 
     /// Где взять сервер — показывается, пока сервер не задан (реферальная ссылка автора).
     public const string RentServerUrl = "https://cloud4box.com/?from=108671";
+    /// Ссылки окна «?»: страница инструмента, Life OS, автор.
+    public const string ToolPageUrl = "https://antonlozhkin.ru/cases/proxy-tunnel/";
+    public const string LifeOSUrl = "https://lifeos.antonlozhkin.ru/";
+    public const string AuthorSiteUrl = "https://antonlozhkin.ru/";
+    public const string AuthorTelegramUrl = "https://t.me/cookiespooky";
 
     [JsonIgnore] public string HostT => Host.Trim();
     [JsonIgnore] public string AdminT => string.IsNullOrWhiteSpace(AdminUser) ? "root" : AdminUser.Trim();

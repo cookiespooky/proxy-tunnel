@@ -138,8 +138,47 @@ struct TunnelSetupCard: View {
     }
 }
 
+/// Окошко «?»: что это, как пользоваться, чьё.
+struct AboutView: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Proxy Tunnel").font(.system(size: 14, weight: .semibold))
+            Text("Отправляет Claude и выбранные сайты через ваш сервер за границей. Всё остальное работает напрямую, как без программы.")
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("1. Настройки → адрес сервера → «Настроить сервер». Это один раз.")
+                Text("2. Нажмите на верхнюю карточку — туннель включится.")
+                Text("3. Перезапустите Claude Code и браузер.")
+                Text("Сайты для туннеля — в настройках, раздел «Через туннель». Если что-то не так — загляните в журнал.")
+                    .foregroundColor(Palette.sub)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+
+            Link("Подробнее об инструменте", destination: Config.toolPageURL)
+
+            Divider()
+
+            HStack(spacing: 0) {
+                Text("Инструмент лаборатории ")
+                Link("Life OS", destination: Config.lifeOSURL)
+            }
+            HStack(spacing: 0) {
+                Text("Разработчик — Антон Ложкин: ")
+                Link("сайт", destination: Config.authorSiteURL)
+                Text(" · ")
+                Link("Telegram", destination: Config.authorTelegramURL)
+            }
+        }
+        .font(.system(size: 12))
+        .padding(14)
+        .frame(width: 300)
+    }
+}
+
 struct PanelView: View {
     @ObservedObject var m: Model
+    @State private var showAbout = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -147,6 +186,9 @@ struct PanelView: View {
                 Text("Proxy Tunnel").font(.system(size: 15, weight: .semibold)).foregroundColor(.primary)
                 Spacer()
                 Group {
+                    Button { showAbout.toggle() } label: { Image(systemName: "questionmark.circle") }
+                        .help("О программе")
+                        .popover(isPresented: $showAbout, arrowEdge: .bottom) { AboutView() }
                     Button { m.openLog() } label: { Image(systemName: "doc.text") }
                         .help("Журнал")
                     Button {
@@ -178,6 +220,17 @@ struct PanelView: View {
             if !m.message.isEmpty {
                 Text(m.message).font(.system(size: 12)).foregroundColor(Palette.sub)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let v = m.updateAvailable {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.down.circle.fill").foregroundColor(Palette.blue)
+                    Text("Доступна версия \(v)").font(.system(size: 13))
+                    Spacer()
+                    Link("Скачать", destination: Update.downloadURL).font(.system(size: 13, weight: .medium))
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.card))
             }
 
             HStack {
@@ -289,6 +342,13 @@ struct SettingsView: View {
                     get: { m.launchAtLogin },
                     set: { m.launchAtLogin = $0 }
                 ))
+                Toggle("Отправлять анонимную статистику", isOn: Binding(
+                    get: { Update.sendStats },
+                    set: { Update.sendStats = $0; m.objectWillChange.send() }
+                ))
+                Text("Раз в день программа узнаёт, нет ли новой версии. Со статистикой она сообщает ещё случайный номер установки, версию, систему и включали ли сегодня туннель — чтобы автор видел, сколькими людьми программа пользуется. Адрес сервера, список сайтов и IP не сохраняются.")
+                    .font(.caption).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Section {

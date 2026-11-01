@@ -34,6 +34,12 @@ public sealed class Core
     public bool ForeignPac;
     bool announceOn;
 
+    // новая версия: что сказал сервер обновлений; новее установленной — строка «Доступна версия…» в панели
+    public string LatestVersion = Update.KnownLatest;
+    DateTime pingFailedAt = DateTime.MinValue;
+    public string? UpdateAvailable =>
+        LatestVersion.Length > 0 && Update.IsNewer(LatestVersion, Update.Version) ? LatestVersion : null;
+
     // настройка сервера
     public AccessState Access = AccessState.Idle;
     public string AccessText = "";
@@ -57,8 +63,22 @@ public sealed class Core
     {
         ui = SynchronizationContext.Current ?? new SynchronizationContext();
         var timer = new System.Windows.Forms.Timer { Interval = 120_000 };
-        timer.Tick += async (_, _) => await Refresh(quiet: true);
+        timer.Tick += async (_, _) => { await Refresh(quiet: true); MaybePing(); };
         timer.Start();
+        ui.Post(async _ => { await Task.Delay(5000); MaybePing(); }, null);
+    }
+
+    /// Спросить о новой версии (и отметиться, если статистика включена), когда пора; сервер не ответил — через полчаса.
+    public async void MaybePing()
+    {
+        var on = Enabled && VerdictOK;
+        if (!Update.Due(on) || DateTime.Now - pingFailedAt < TimeSpan.FromMinutes(30)) return;
+        pingFailedAt = DateTime.Now;           // и защита от второго запроса, пока идёт первый
+        var v = await Update.Ping(on);
+        if (v == null) return;
+        pingFailedAt = DateTime.MinValue;
+        LatestVersion = v;
+        Fire();
     }
 
     // MARK: туннель и системные настройки
@@ -197,6 +217,7 @@ public sealed class Core
         Checking = false;
         Busy = false;
         Fire();
+        MaybePing();
     }
 
     // MARK: настройка сервера

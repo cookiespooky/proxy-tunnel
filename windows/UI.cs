@@ -79,6 +79,81 @@ static class Ui
     }
 }
 
+/// «?» в круге в шапке панели — открывает окно «О программе».
+sealed class HelpGlyph : Control
+{
+    public HelpGlyph()
+    {
+        DoubleBuffered = true;
+        Cursor = Cursors.Hand;
+        Size = new Size(18, 18);
+        Margin = new Padding(0, 3, 8, 0);
+        new ToolTip().SetToolTip(this, "О программе");
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+        using (var pen = new Pen(Palette.Blue, 1.4f)) g.DrawEllipse(pen, 1, 1, Width - 3, Height - 3);
+        TextRenderer.DrawText(g, "?", Palette.Bold, new Rectangle(0, 0, Width, Height), Palette.Blue,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+    }
+}
+
+/// Окно «?»: что это, как пользоваться, чьё.
+sealed class AboutForm : Form
+{
+    static AboutForm? shown;
+
+    public static void ShowOnce()
+    {
+        if (shown == null || shown.IsDisposed) shown = new AboutForm();
+        shown.Show();
+        shown.Activate();
+    }
+
+    static LinkLabel Link(string text, string url)
+    {
+        var l = new LinkLabel { Text = text, AutoSize = true, Font = Palette.Text, Margin = new Padding(0, 3, 0, 3) };
+        l.LinkClicked += (_, _) => Ui.Open(url);
+        return l;
+    }
+
+    AboutForm()
+    {
+        const int W = 320;
+        Text = "О программе Proxy Tunnel";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterScreen;
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        BackColor = Color.White;
+        Padding = new Padding(14);
+        Font = Palette.Text;
+
+        var col = Ui.Column(W);
+        col.Controls.Add(Ui.L("Proxy Tunnel", Palette.Header, width: W));
+        col.Controls.Add(Ui.L("Отправляет Claude и выбранные сайты через ваш сервер за границей. Всё остальное работает напрямую, как без программы.", width: W));
+        col.Controls.Add(Ui.L("1. Настройки → адрес сервера → «Настроить сервер». Это один раз.", width: W));
+        col.Controls.Add(Ui.L("2. Нажмите на верхнюю карточку — туннель включится.", width: W));
+        col.Controls.Add(Ui.L("3. Перезапустите Claude Code и браузер.", width: W));
+        col.Controls.Add(Ui.L("Сайты для туннеля — в настройках, раздел «Через туннель». Если что-то не так — загляните в журнал.", Palette.Small, Palette.Sub, W));
+        col.Controls.Add(Link("Подробнее об инструменте", Config.ToolPageUrl));
+        var lab = Ui.L("Инструмент лаборатории", width: W);
+        lab.Margin = new Padding(0, 12, 0, 3);
+        var lifeos = Link("Life OS", Config.LifeOSUrl);
+        lifeos.Margin = new Padding(0, 12, 0, 3);
+        col.Controls.Add(Ui.Row(lab, lifeos));
+        col.Controls.Add(Ui.Row(Ui.L("Разработчик — Антон Ложкин:", width: W),
+            Link("сайт", Config.AuthorSiteUrl), Link("Telegram", Config.AuthorTelegramUrl)));
+        Controls.Add(col);
+    }
+}
+
 /// Верхняя карточка — она же выключатель туннеля.
 sealed class Card : Control
 {
@@ -176,9 +251,11 @@ sealed class StatusForm : Form
         settings.LinkClicked += (_, _) => { Hide(); app.ShowSettings(); };
         var log = new LinkLabel { Text = "Журнал", AutoSize = true, Font = Palette.Text };
         log.LinkClicked += (_, _) => app.OpenLog();
+        var help = new HelpGlyph();
+        help.Click += (_, _) => { Hide(); AboutForm.ShowOnce(); };
         var header = Ui.L("Proxy Tunnel", Palette.Header);
         header.Width = 170;
-        body.Controls.Add(Ui.Row(header, settings, log));
+        body.Controls.Add(Ui.Row(header, help, settings, log));
 
         var card = new Card { Width = W };
         if (!core.Config.IsComplete)
@@ -214,6 +291,15 @@ sealed class StatusForm : Form
         }
 
         if (core.Message.Length > 0) body.Controls.Add(Ui.L(core.Message, Palette.Small, Palette.Sub, W));
+
+        if (core.UpdateAvailable is { } nv)
+        {
+            var upd = Ui.L($"Доступна версия {nv}", Palette.Bold, Palette.Blue);
+            upd.Margin = new Padding(0, 8, 8, 2);
+            var dl = new LinkLabel { Text = "Скачать", AutoSize = true, Font = Palette.Text, Margin = new Padding(0, 9, 0, 2) };
+            dl.LinkClicked += (_, _) => Ui.Open(Update.DownloadUrl);
+            body.Controls.Add(Ui.Row(upd, dl));
+        }
 
         if (core.Config.IsComplete && core.Enabled)
         {
@@ -296,6 +382,7 @@ sealed class SettingsForm : Form
     readonly TextBox tunnelUser = new() { Width = 160 };
     readonly NumericUpDown localPort = Num(8888), remotePort = Num(8888), pacPort = Num(8889);
     readonly CheckBox autostart = new() { Text = "Запускать при входе в Windows", AutoSize = true };
+    readonly CheckBox sendStats = new() { Text = "Отправлять анонимную статистику", AutoSize = true };
     readonly Label note = Ui.L("", Palette.Small, Palette.Sub, W);
     readonly System.Windows.Forms.Timer probeTimer = new() { Interval = 900 };
     bool loaded;
@@ -401,6 +488,10 @@ sealed class SettingsForm : Form
         autostart.Margin = new Padding(0, 14, 0, 4);
         autostart.CheckedChanged += (_, _) => { if (!loaded) return; try { Autostart.On = autostart.Checked; } catch (Exception e) { note.Text = "Автозапуск: " + e.Message; } };
         root.Controls.Add(autostart);
+        sendStats.Margin = new Padding(0, 4, 0, 2);
+        sendStats.CheckedChanged += (_, _) => { if (loaded) Update.SendStats = sendStats.Checked; };
+        root.Controls.Add(sendStats);
+        root.Controls.Add(Ui.L("Раз в день программа узнаёт, нет ли новой версии. Со статистикой она сообщает ещё случайный номер установки, версию, систему и включали ли сегодня туннель — чтобы автор видел, сколькими людьми программа пользуется. Адрес сервера, список сайтов и IP не сохраняются.", Palette.Small, Palette.Sub, W));
 
         var save = new Button { Text = "Сохранить", AutoSize = true, Font = Palette.Bold };
         save.Click += (_, _) => Save();
@@ -474,6 +565,7 @@ sealed class SettingsForm : Form
         pacPort.Value = Math.Clamp(c.PacPort, 1, 65535);
         domains.Lines = c.Domains.ToArray();
         try { autostart.Checked = Autostart.On; } catch { }
+        sendStats.Checked = Update.SendStats;
         note.Text = "";
         loaded = true;
         Sync();

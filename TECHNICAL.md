@@ -73,6 +73,26 @@ Claude Code ── HTTPS_PROXY ─┐
 соединение `ControlPath=/tmp/pt-%C`, Windows — один `SshClient`), а «Проверить соединение» при отказе ждёт
 30 секунд и повторяет, не считая это провалом ключа.
 
+## Обновления и статистика
+
+Раз в день (и ещё раз — при первом за день включении туннеля) программа делает один GET на
+`https://stats.antonlozhkin.ru/pt/ping?os=mac|win&v=<версия>[&id=<32 hex>&on=0|1]` и получает
+`{"latest": "<номер последнего выпуска>", "url": …}`. Номер новее своего — в панели строка «Доступна версия…»
+со ссылкой на файл выпуска (`releases/latest/download/…`). Сама программа не скачивает и не ставит обновления.
+
+- `id` — случайный номер установки (UUID без дефисов), в `stats.json` в папке программы; `id` и `on` уходят только
+  при включённой галочке «Отправлять анонимную статистику» (Mac — `UserDefaults` `sendStats`, Windows —
+  `HKCU\Software\Proxy Tunnel\SendStats`). Без них запрос только узнаёт версию.
+- Сервер не хранит IP (nginx `access_log off`, отказы по частоте ниже уровня журнала), хранит по номеру: день
+  первого запроса, систему, версию и дни запросов за последние 35 дней. Номер последней версии сервер берёт у
+  GitHub (`releases/latest`, раз в час). Код сервера — не в этом репозитории.
+- Файлы: `menubar/Update.swift`, `windows/Update.cs`.
+
+Выпуск новой версии: поднять номер в `menubar/build.sh` (`CFBundleShortVersionString`) и
+`windows/ProxyTunnel.csproj` (`Version`), собрать `menubar/package.sh`, взять `ProxyTunnel-windows.exe` из
+сборки GitHub Actions и опубликовать выпуск с тегом `vX.Y` и обоими файлами под теми же именами — ссылки
+`releases/latest/download/…` в README и в программе начнут вести на него, а программы увидят его в течение часа.
+
 ## Ключи
 
 Ключи программы — в её папке, не в `~/.ssh`; ключи пользователя только пробуются при входе. Годный ключ
@@ -99,7 +119,8 @@ Claude Code ── HTTPS_PROXY ─┐
   сервер, заданный именем, ищется через DNS-over-HTTPS по этому интерфейсу (`Net.prepare`). Не работает рядом
   с клиентом, у которого жёсткий «kill switch».
 - Файлы: `Config.swift` (настройки, PAC), `Net.swift` (интерфейс, DNS), `Tunnel.swift` (ssh, PAC-сервер),
-  `Setup.swift` (ssh от имени админа), `Model.swift` (состояние, проверки, настройка), `Views.swift` (окна).
+  `Setup.swift` (ssh от имени админа), `Model.swift` (состояние, проверки, настройка), `Views.swift` (окна),
+  `Update.swift` (новая версия, статистика). Новый файл — дописать в список `swiftc` в `build.sh`.
 - Сборка: `menubar/build.sh` (swiftc, Intel + Apple Silicon, подпись ad hoc; Command Line Tools, macOS 13+);
   `menubar/package.sh` → `dist/ProxyTunnel-mac.dmg`. Тестов нет: проверка — сборка и `bash -n` скриптов.
 - Скрипты: `check.sh` (те же проверки, последняя строка «МОЖНО»/«НЕЛЬЗЯ»), `mode.sh on|off` (прокси и PAC без
