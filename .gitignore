@@ -7,3 +7,4 @@ known_hosts
 id_ed25519*
 *.key
 vless.txt
+dist/
