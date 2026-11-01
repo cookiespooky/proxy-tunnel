@@ -107,6 +107,8 @@ final class Model: ObservableObject {
     /// Прокси для Claude Code и PAC включены — система ходит к выбранным доменам через туннель.
     /// Включаются сами, как только сервер настроен; снимаются при выходе из приложения.
     @Published var applied = false
+    /// Туннель включён пользователем (нажатием на верхнюю карточку). При запуске приложения — выключен.
+    @Published var enabled = false
     @Published var steps: [Step] = []
     @Published var verdictOK = false
     @Published var busy = false
@@ -141,14 +143,32 @@ final class Model: ObservableObject {
 
     var icon: String {
         guard config.isComplete else { return "questionmark.circle" }
+        guard enabled else { return "shield.slash" }
         return verdictOK ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
     }
 
+    /// Нажатие на верхнюю карточку: включить или выключить туннель.
+    func toggleTunnel() {
+        guard config.isComplete, !busy else { return }
+        enabled.toggle()
+        message = enabled ? "" : "Туннель выключен: Claude Code и браузер ходят напрямую. Перезапустите Claude Code, если он открыт."
+        Task { await startServices() }
+    }
+
     /// Запускает PAC и туннель по текущим настройкам; старый ssh на том же пробросе гасит.
+    /// Туннель выключен — гасит его и снимает системные настройки (в том числе оставшиеся после аварийного закрытия).
     func startServices() async {
-        pac.start(port: config.pacPort, text: config.pacText)
         tunnel.stop()
         _ = await run(["/usr/bin/pkill", "-f", "--", "ssh -N -F none .*-L \(config.forwardSpec) "])
+        guard config.isComplete && enabled else {
+            pac.stop()
+            await removeSystemSettings()
+            steps = []
+            verdictOK = false
+            checkedAt = nil
+            return
+        }
+        pac.start(port: config.pacPort, text: config.pacText)
         if config.isComplete {
             await Net.prepare(config.hostTrimmed, interface: config.effectiveInterface)
             tunnel.start(config)
@@ -244,6 +264,14 @@ final class Model: ObservableObject {
         return r.error
     }
 
+    /// Выключение туннеля: снять прокси для Claude Code и вернуть службам прежний PAC.
+    func removeSystemSettings() async {
+        if ClaudeSettings.proxy() == config.proxyURL { try? ClaudeSettings.set(proxy: nil, host: config.hostTrimmed) }
+        let url = config.pacURL
+        await Task.detached { Model.removePAC(url) }.value
+        applied = false
+    }
+
     /// При выходе из приложения: снять прокси для Claude Code и вернуть службам прежний PAC.
     /// Синхронно — приложение уже закрывается.
     func removeSystemSettingsSync() {
@@ -253,7 +281,7 @@ final class Model: ObservableObject {
     }
 
     func reconnect() {
-        guard !busy else { return }
+        guard !busy, enabled else { return }
         message = "Переподключаю туннель…"
         Task {
             await startServices()
@@ -266,7 +294,7 @@ final class Model: ObservableObject {
     /// quiet — фоновая проверка: окошко не мигает, результат появляется целиком в конце.
     func refresh(quiet: Bool = false) {
         guard !busy else { return }
-        guard config.isComplete else { steps = []; verdictOK = false; return }
+        guard config.isComplete && enabled else { steps = []; verdictOK = false; return }
         busy = true
         self.quiet = quiet
         if !quiet { checking = true }
@@ -371,6 +399,8 @@ final class Model: ObservableObject {
     @Published var accessNote = ""
     /// Сервер именно не принял ключ (а не отклонил подключение) — тогда предлагаем создать ключ.
     @Published var keyDenied = false
+    /// Вход по ключу известен по настройке (одна проверка), а не по кнопке «Проверить соединение» (три подряд).
+    @Published var keyVerifiedBySetup = false
     private var adminIsRoot = true
 
     func probeAccess(_ c: Config) async {
@@ -488,6 +518,7 @@ final class Model: ObservableObject {
 
         // 5. сохранить и дождаться туннеля
         c.adminUser = admin
+        enabled = true   // сервер только что настроен — туннель включается
         apply(c)
         setupByPassword = byPassword
         keyStable = nil
@@ -510,6 +541,7 @@ final class Model: ObservableObject {
         let keyWorks = !byPassword || (wantAdminKey && setupSteps[3].state == .ok)
         access = keyWorks ? .key(root: adminIsRoot) : .needPassword
         keyStable = keyWorks
+        keyVerifiedBySetup = keyWorks
         keyDenied = false
         passwordLogin = byPassword ? true : passwordOn
         accessNote = keyWorks ? "Вход по ключу проверен при настройке." : ""
@@ -546,6 +578,7 @@ final class Model: ObservableObject {
         defer { accessBusy = false }
         keyStable = nil
         keyDenied = false
+        keyVerifiedBySetup = false
         let c = config, admin = c.adminTrimmed
         await Net.prepare(c.hostTrimmed, interface: c.effectiveInterface)
         var ok = 0

@@ -23,7 +23,9 @@ struct StatusCard: View {
                 if m.checking {
                     ProgressView().controlSize(.small)
                 } else {
-                    Image(systemName: s.icon).font(.system(size: 17, weight: .semibold)).foregroundColor(s.color)
+                    // Знак внутри щита — белый, сам щит — цветом состояния.
+                    Image(systemName: s.icon).font(.system(size: 17, weight: .semibold))
+                        .symbolRenderingMode(.palette).foregroundStyle(.white, s.color)
                 }
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -34,13 +36,23 @@ struct StatusCard: View {
                 }
             }
             Spacer(minLength: 0)
+            // Карточка — выключатель туннеля.
+            Image(systemName: "power")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(m.enabled ? Palette.green : Palette.sub)
+                .help(m.enabled ? "Выключить туннель" : "Включить туннель")
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.card))
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onTapGesture { m.toggleTunnel() }
         .animation(.easeInOut(duration: 0.2), value: s.title)
     }
 
     private var status: (title: String, subtitle: String, icon: String, color: Color) {
+        if !m.enabled {
+            return ("Туннель выключен", "Нажмите, чтобы включить", "shield.slash.fill", .secondary)
+        }
         if m.checking { return ("Проверяю…", "", "", .secondary) }
         if m.verdictOK {
             let where_ = m.steps.count > 1 ? m.steps[1].detail : ""
@@ -150,7 +162,9 @@ struct PanelView: View {
                 TunnelSetupCard(m: m)
             } else {
                 StatusCard(m: m)
+            }
 
+            if m.config.isComplete && m.enabled && !m.steps.isEmpty {
                 VStack(spacing: 0) {
                     ForEach(Array(m.steps.enumerated()), id: \.element.id) { i, step in
                         StepRow(step: step)
@@ -171,10 +185,10 @@ struct PanelView: View {
                         .font(.system(size: 12)).foregroundColor(Palette.sub)
                 }
                 Spacer()
-                if m.config.isComplete {
+                if m.config.isComplete && m.enabled {
                     Button("Переподключить") { m.reconnect() }.disabled(m.busy)
+                    Button("Проверить") { m.refresh() }.disabled(m.busy)
                 }
-                Button("Проверить") { m.refresh() }.disabled(m.busy)
             }
             .buttonStyle(.borderless)
             .foregroundColor(Palette.blue)
@@ -397,7 +411,8 @@ struct SettingsView: View {
             LabeledContent("Вход по ключу") {
                 switch m.keyStable {
                 case .none: Text("не проверен").foregroundColor(.secondary)
-                case .some(true): Text("стабилен, 3 из 3").foregroundColor(Palette.green)
+                case .some(true): Text(m.keyVerifiedBySetup ? "работает (проверено при настройке)" : "стабилен, 3 из 3")
+                    .foregroundColor(Palette.green)
                 case .some(false): Text("не прошёл").foregroundColor(Palette.red)
                 }
             }
