@@ -7,7 +7,6 @@ conf() { python3 -c 'import json,sys;c=json.load(open(sys.argv[1]));print(c.get(
 EXPECT_IP=$(conf host "")
 LOCAL=$(conf localPort 8888)
 PACP=$(conf pacPort 8889)
-SVC=$(conf networkService Wi-Fi)
 bad=0
 ok()   { printf "  ✓ %s\n" "$1"; }
 fail() { printf "  ✗ %s\n" "$1"; bad=1; }
@@ -39,7 +38,7 @@ if echo "$eff" | grep -q "ProxyAutoConfigEnable : 1" && echo "$eff" | grep -q "P
 else
   iface=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
   case "$iface" in utun*|ppp*|ipsec*) fail "включён VPN ($iface), система не применяет PAC — браузер и приложение Claude идут через VPN";;
-    *) fail "система не применяет PAC (служба $SVC)";; esac
+    *) fail "система не применяет PAC туннеля";; esac
 fi
 if echo "$eff" | grep -Eq "(HTTP|HTTPS|SOCKS)Enable : 1"; then fail "в системе включён ещё и обычный прокси — браузер может пойти через него"; fi
 if curl -s --noproxy '*' --max-time 3 "http://127.0.0.1:$PACP/proxy.pac" | grep -q "PROXY 127.0.0.1:$LOCAL"; then

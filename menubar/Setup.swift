@@ -95,7 +95,7 @@ enum ServerSetup {
                  "-o", "UserKnownHostsFile=\"\(Config.knownHostsURL.path)\"",
                  "-o", "StrictHostKeyChecking=accept-new",
                  "-p", String(c.sshPort)]
-        let iface = c.interface.trimmingCharacters(in: .whitespaces)
+        let iface = c.effectiveInterface
         if !iface.isEmpty { a += ["-o", "BindInterface=\(iface)"] }
         a += shared ? ["-o", "ControlMaster=auto", "-o", "ControlPath=\(controlPath)", "-o", "ControlPersist=60"]
                     : ["-o", "ControlPath=none"]
@@ -134,7 +134,7 @@ enum ServerSetup {
     static func exec(_ c: Config, admin: String, auth: AdminAuth, _ cmd: String, stdin: String? = nil,
                      shared: Bool = true, timeout: Double = 600) async -> (Int32, String) {
         await withPassword(auth) { env in
-            await runSSH(baseArgs(c, auth: auth, shared: shared) + ["\(admin)@\(c.hostTrimmed)", cmd],
+            await runSSH(baseArgs(c, auth: auth, shared: shared) + c.sshDest(admin) + [cmd],
                          env: env, stdin: stdin, timeout: timeout)
         }
     }
@@ -142,7 +142,7 @@ enum ServerSetup {
     /// Закрывает общее соединение (после настройки по паролю оно не должно висеть).
     static func closeShared(_ c: Config, admin: String) async {
         _ = await runSSH(["-F", "none", "-o", "ControlPath=\(controlPath)", "-p", String(c.sshPort),
-                          "-O", "exit", "\(admin)@\(c.hostTrimmed)"], timeout: 10)
+                          "-O", "exit"] + c.sshDest(admin), timeout: 10)
     }
 
     /// Понятная причина отказа ssh.
@@ -234,7 +234,7 @@ enum ServerSetup {
     /// Снаружи: предлагает ли сервер вход по паролю. Ответ ssh «Permission denied (publickey,password)».
     static func serverOffersPassword(_ c: Config, admin: String) async -> Bool? {
         var a = baseArgs(c, auth: .password(""))
-        a += ["-o", "BatchMode=yes", "\(admin)@\(c.hostTrimmed)", "true"]
+        a += ["-o", "BatchMode=yes"] + c.sshDest(admin) + ["true"]
         let (_, out) = await runSSH(a, timeout: 40)
         guard let r = out.range(of: "Permission denied ("),
               let end = out[r.upperBound...].firstIndex(of: ")") else { return nil }

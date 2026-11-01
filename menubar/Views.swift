@@ -250,8 +250,7 @@ struct SettingsView: View {
 
             Section("Дополнительно") {
                 TextField("Пользователь туннеля", text: $draft.user)
-                TextField("Интерфейс", text: $draft.interface, prompt: Text("en0 — Wi-Fi"))
-                TextField("Сетевая служба macOS", text: $draft.networkService)
+                TextField("Интерфейс для туннеля", text: $draft.interface, prompt: Text("автоматически"))
                 TextField("Порт туннеля на Маке", value: $draft.localPort, format: plainInt)
                 TextField("Порт прокси на сервере", value: $draft.remotePort, format: plainInt)
                 TextField("Порт PAC", value: $draft.pacPort, format: plainInt)

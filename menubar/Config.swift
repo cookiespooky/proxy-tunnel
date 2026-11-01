@@ -9,8 +9,8 @@ struct Config: Codable, Equatable {
     var localPort = 8888      // порт туннеля на Маке
     var remotePort = 8888     // порт прокси на сервере
     var pacPort = 8889
-    var interface = "en0"
-    var networkService = "Wi-Fi"
+    var interface = ""        // пусто — интерфейс прямого выхода (Net.physicalInterface)
+    var networkService = "Wi-Fi"   // не используется с 2026-11-01: PAC ставится на все службы
     var adminUser = "root"    // кто настраивает сервер
     var adminKey = ""         // свой ключ входа на сервер; пусто — ~/.ssh, агент и ключ входа приложения
     var domains = ["claude.ai", "claude.com", "anthropic.com", "claudeusercontent.com", "claude.site",

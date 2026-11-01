@@ -39,10 +39,10 @@ final class Tunnel: ObservableObject {
                     "-o", "StrictHostKeyChecking=accept-new",
                     "-p", String(c.sshPort),
                     "-L", c.forwardSpec]
-        if !c.interface.trimmingCharacters(in: .whitespaces).isEmpty {
-            args += ["-o", "BindInterface=\(c.interface.trimmingCharacters(in: .whitespaces))"]
-        }
-        args.append("\(c.user)@\(c.hostTrimmed)")
+        // ssh — мимо VPN: через интерфейс прямого выхода и по адресу, найденному без DNS VPN.
+        let iface = c.effectiveInterface
+        if !iface.isEmpty { args += ["-o", "BindInterface=\(iface)"] }
+        args += c.sshDest(c.user)
         p.arguments = args
         p.standardOutput = FileHandle.nullDevice
         let err = Pipe()
@@ -64,7 +64,7 @@ final class Tunnel: ObservableObject {
             process = p
             running = true
             startedAt = Date()
-            Log.append("ssh запущен: \(c.user)@\(c.hostTrimmed):\(c.sshPort), \(c.forwardSpec)")
+            Log.append("ssh запущен: \(c.user)@\(c.hostTrimmed):\(c.sshPort), \(c.forwardSpec), через \(iface.isEmpty ? "маршрут по умолчанию" : iface)")
         } catch {
             lastError = error.localizedDescription
             scheduleRetry()

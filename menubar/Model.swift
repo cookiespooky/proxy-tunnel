@@ -150,6 +150,7 @@ final class Model: ObservableObject {
         tunnel.stop()
         _ = await run(["/usr/bin/pkill", "-f", "--", "ssh -N -F none .*-L \(config.forwardSpec) "])
         if config.isComplete {
+            await Net.prepare(config.hostTrimmed, interface: config.effectiveInterface)
             tunnel.start(config)
             if let e = await applySystemSettings() { message = e }
         }
@@ -165,8 +166,22 @@ final class Model: ObservableObject {
 
     // MARK: системные настройки: прокси для Claude Code и PAC
 
-    private func pacState() async -> (String, Bool) {
-        let (_, out) = await run(["/usr/sbin/networksetup", "-getautoproxyurl", config.networkService])
+    // PAC — на всех включённых сетевых службах, VPN тоже: подключённый VPN становится основной службой, и macOS
+    // берёт настройки прокси у него, а не у Wi-Fi. Служба с чужим включённым PAC не трогается. Прежнее состояние
+    // каждой изменённой службы запоминается в pac-services.json и возвращается при выходе.
+
+    struct PacPrior: Codable { var url: String; var enabled: Bool }
+    nonisolated static var pacStateURL: URL { Config.supportDir.appendingPathComponent("pac-services.json") }
+    /// Службы, где уже включён чужой PAC — их не трогаем, проверка о них говорит.
+    @Published var foreignPAC: [String] = []
+
+    nonisolated static func services() -> [String] {
+        let (_, out) = Net.runSync("/usr/sbin/networksetup", ["-listallnetworkservices"])
+        return out.split(separator: "\n").dropFirst().map(String.init).filter { !$0.hasPrefix("*") && !$0.isEmpty }
+    }
+
+    nonisolated static func autoProxy(_ svc: String) -> (url: String, on: Bool) {
+        let (_, out) = Net.runSync("/usr/sbin/networksetup", ["-getautoproxyurl", svc])
         var url = "", on = false
         for line in out.split(separator: "\n") {
             if line.hasPrefix("URL: ") { url = String(line.dropFirst(5)) }
@@ -175,35 +190,66 @@ final class Model: ObservableObject {
         return (url, on)
     }
 
-    private func detectApplied() async {
-        let (url, on) = await pacState()
-        applied = ClaudeSettings.proxy() == config.proxyURL && on && url == config.pacURL
+    nonisolated static func loadPriors() -> [String: PacPrior] {
+        (try? Data(contentsOf: pacStateURL)).flatMap { try? JSONDecoder().decode([String: PacPrior].self, from: $0) } ?? [:]
     }
 
-    /// Включает прокси для Claude Code и PAC, если они ещё не включены (или их сбросили).
+    /// Ставит PAC на службы, где его ещё нет. changed — хоть одну службу поменяли.
+    nonisolated static func applyPAC(_ url: String) -> (changed: Bool, foreign: [String], error: String?) {
+        var priors = loadPriors()
+        var changed = false, foreign: [String] = [], errors: [String] = []
+        for svc in services() {
+            let cur = autoProxy(svc)
+            if cur.on && cur.url == url { continue }
+            if cur.on { foreign.append(svc); continue }
+            if priors[svc] == nil { priors[svc] = PacPrior(url: cur.url, enabled: false) }
+            let a = Net.runSync("/usr/sbin/networksetup", ["-setautoproxyurl", svc, url])
+            let b = Net.runSync("/usr/sbin/networksetup", ["-setautoproxystate", svc, "on"])
+            if a.0 == 0 && b.0 == 0 { changed = true } else { errors.append("\(svc): \((a.1 + b.1).trimmingCharacters(in: .whitespacesAndNewlines))") }
+        }
+        if let d = try? JSONEncoder().encode(priors) { try? d.write(to: pacStateURL, options: .atomic) }
+        if !changed && errors.isEmpty { Log.append("PAC: все службы уже на туннеле") }
+        return (changed, foreign, errors.isEmpty ? nil : "Не удалось включить PAC — " + errors.joined(separator: "; "))
+    }
+
+    /// Возвращает прежнее состояние тем службам, где стоит наш PAC.
+    nonisolated static func removePAC(_ url: String) {
+        let priors = loadPriors()
+        for svc in services() {
+            let cur = autoProxy(svc)
+            guard cur.url == url else { continue }
+            let p = priors[svc] ?? PacPrior(url: "(null)", enabled: false)
+            if p.url != url && p.url != "(null)" && !p.url.isEmpty {
+                _ = Net.runSync("/usr/sbin/networksetup", ["-setautoproxyurl", svc, p.url])
+            }
+            _ = Net.runSync("/usr/sbin/networksetup", ["-setautoproxystate", svc, p.enabled ? "on" : "off"])
+        }
+        try? FileManager.default.removeItem(at: pacStateURL)
+    }
+
+    /// Включает прокси для Claude Code и PAC на всех службах, если чего-то нет (сбросили, появился новый VPN).
     private func applySystemSettings() async -> String? {
-        await detectApplied()
-        guard !applied else { return nil }
-        do { try ClaudeSettings.set(proxy: config.proxyURL, host: config.hostTrimmed) }
-        catch { return error.localizedDescription }
-        let a = await run(["/usr/sbin/networksetup", "-setautoproxyurl", config.networkService, config.pacURL])
-        let b = await run(["/usr/sbin/networksetup", "-setautoproxystate", config.networkService, "on"])
-        if a.0 != 0 || b.0 != 0 { return "Не удалось включить PAC: " + (a.1 + b.1).trimmingCharacters(in: .whitespacesAndNewlines) }
+        let ccWasSet = ClaudeSettings.proxy() == config.proxyURL
+        if !ccWasSet {
+            do { try ClaudeSettings.set(proxy: config.proxyURL, host: config.hostTrimmed) }
+            catch { return error.localizedDescription }
+        }
+        let url = config.pacURL
+        let r = await Task.detached { Model.applyPAC(url) }.value
+        foreignPAC = r.foreign
+        if !applied || !ccWasSet {
+            message = "Туннель включён для Claude. Перезапустите Claude, если он был открыт."
+        }
         applied = true
-        message = "Туннель включён для Claude. Перезапустите Claude, если он был открыт."
-        return nil
+        return r.error
     }
 
-    /// При выходе из приложения: снять прокси и PAC, чтобы без туннеля ничего не осталось направленным в него.
+    /// При выходе из приложения: снять прокси для Claude Code и вернуть службам прежний PAC.
     /// Синхронно — приложение уже закрывается.
     func removeSystemSettingsSync() {
-        guard applied || ClaudeSettings.proxy() == config.proxyURL else { return }
-        try? ClaudeSettings.set(proxy: nil, host: config.hostTrimmed)
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
-        p.arguments = ["-setautoproxystate", config.networkService, "off"]
-        try? p.run()
-        p.waitUntilExit()
+        if ClaudeSettings.proxy() == config.proxyURL { try? ClaudeSettings.set(proxy: nil, host: config.hostTrimmed) }
+        Model.removePAC(config.pacURL)
+        applied = false
     }
 
     func reconnect() {
@@ -262,7 +308,7 @@ final class Model: ObservableObject {
         // Доказательство для всего, что идёт через прокси: claude.ai видит адрес сервера, а не VPN и не Россию.
         let (ip, loc) = await traceViaTunnel()
         let host = config.hostTrimmed
-        let expected = await Task.detached { resolveIPv4(host) }.value
+        let expected = await Task.detached { Net.cached(host) ?? (Net.isIP(host) ? host : resolveIPv4(host)) }.value
         let ipOK = !ip.isEmpty && loc != "RU" && (expected == nil || ip == expected)
         var t2 = ip.isEmpty ? "нет ответа" : "\(ip), \(loc)"
         if !ip.isEmpty && !ipOK, let e = expected { t2 += " — ожидался \(e)" }
@@ -285,7 +331,8 @@ final class Model: ObservableObject {
         if !pacOn {
             t4 = viaVPN
                 ? "Включён VPN, и система не применяет PAC: браузер и приложение Claude идут через VPN, а не через туннель. Выключите VPN — Claude Code при этом и так идёт через туннель."
-                : "Система не применяет PAC (служба «\(config.networkService)» — та, что в «Дополнительно»?)"
+                : (foreignPAC.isEmpty ? "Система не применяет PAC туннеля"
+                   : "На службе «\(foreignPAC.joined(separator: "», «"))» уже стоит другой PAC — приложение его не трогает")
         } else if manual {
             t4 = "В системе включён ещё и обычный прокси (VPN-клиент?) — браузер может пойти через него"
         } else if !served {
@@ -329,6 +376,7 @@ final class Model: ObservableObject {
         let gen = probeGen
         guard !c.hostTrimmed.isEmpty else { access = .idle; return }
         access = .checking
+        await Net.prepare(c.hostTrimmed, interface: c.effectiveInterface)
         let r = await ServerSetup.probe(c, admin: c.adminTrimmed, auth: c.adminAuth)
         guard gen == probeGen else { return }   // адрес успели поменять
         access = Model.access(from: r, admin: c.adminTrimmed)
@@ -370,6 +418,7 @@ final class Model: ObservableObject {
         setupSteps = makeSteps(titles)
         setupSteps[0].state = .running
         guard !c.host.isEmpty else { setupStep(0, false, "Укажите адрес сервера"); return }
+        await Net.prepare(c.host, interface: c.effectiveInterface)
 
         // 1. ключ туннеля
         if let e = await generateKey(at: c.keyPath) { setupStep(0, false, "Не создан: \(e)"); return }
@@ -485,6 +534,7 @@ final class Model: ObservableObject {
         defer { accessBusy = false }
         keyStable = nil
         let c = config, admin = c.adminTrimmed
+        await Net.prepare(c.hostTrimmed, interface: c.effectiveInterface)
         var ok = 0
         var fail = ""
         for i in 0..<3 {
@@ -541,7 +591,7 @@ final class Model: ObservableObject {
         guard let line = out.split(separator: "\n").first(where: { $0.hasPrefix("n") && $0.contains("->") }),
               let local = line.dropFirst().split(separator: "->").first?.split(separator: ":").first.map(String.init)
         else { return "" }
-        let iface = config.interface.trimmingCharacters(in: .whitespaces)
+        let iface = config.effectiveInterface
         guard !iface.isEmpty else { return "с адреса \(local)" }
         let (_, ifIP) = await run(["/usr/sbin/ipconfig", "getifaddr", iface])
         return ifIP.trimmingCharacters(in: .whitespacesAndNewlines) == local

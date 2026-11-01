@@ -1,8 +1,8 @@
 #!/bin/bash
 # Включает и снимает прокси туннеля для Claude Code и браузера — то же, что делает приложение
 # (само включает, когда сервер настроен, и снимает при выходе). Нужен, если приложение закрыли аварийно.
-#   mode.sh on   — прокси в ~/.claude/settings.json и PAC для сетевой службы
-#   mode.sh off  — снять и то и другое
+#   mode.sh on   — прокси в ~/.claude/settings.json и PAC на всех сетевых службах (VPN тоже; чужой PAC не трогается)
+#   mode.sh off  — снять прокси и выключить PAC там, где стоит наш
 #   mode.sh      — показать, включено ли
 # Сервер, порты и службу берёт из настроек приложения.
 set -e
@@ -13,7 +13,8 @@ conf() { python3 -c 'import json,sys;c=json.load(open(sys.argv[1]));print(c.get(
 HOST=$(conf host "")
 LOCAL=$(conf localPort 8888)
 PACP=$(conf pacPort 8889)
-SVC=$(conf networkService Wi-Fi)
+services() { networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*'; }
+pac_of() { networksetup -getautoproxyurl "$1"; }
 PROXY="http://127.0.0.1:$LOCAL"
 PAC_URL="http://127.0.0.1:$PACP/proxy.pac"
 
@@ -41,19 +42,25 @@ case "$1" in
   on)
     [ -n "$HOST" ] || { echo "В настройках приложения не указан сервер."; exit 2; }
     set_env on
-    networksetup -setautoproxyurl "$SVC" "$PAC_URL"
-    networksetup -setautoproxystate "$SVC" on
+    services | while IFS= read -r s; do
+      p=$(pac_of "$s")
+      if echo "$p" | grep -q "Enabled: Yes" && ! echo "$p" | grep -qF "URL: $PAC_URL"; then echo "пропущена (чужой PAC): $s"; continue; fi
+      networksetup -setautoproxyurl "$s" "$PAC_URL"; networksetup -setautoproxystate "$s" on
+    done
     echo "Включено. Перезапустите Claude Code и приложение Claude, затем: bash $(cd "$(dirname "$0")" && pwd)/check.sh"
     ;;
   off)
     set_env off
-    networksetup -setautoproxystate "$SVC" off
+    services | while IFS= read -r s; do
+      pac_of "$s" | grep -qF "URL: $PAC_URL" && networksetup -setautoproxystate "$s" off
+    done
+    rm -f "$HOME/Library/Application Support/Proxy Tunnel/pac-services.json"
     echo "Снято. Claude Code и браузер ходят напрямую."
     ;;
   "")
     cc=$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.claude/settings.json"))).get("env",{}).get("HTTPS_PROXY",""))' 2>/dev/null)
-    pac=$(networksetup -getautoproxyurl "$SVC" | grep -c "Enabled: Yes" || true)
-    echo "Claude Code: ${cc:-без прокси}; PAC для $SVC: $([ "$pac" = 1 ] && echo вкл || echo выкл)"
+    n=0; services | { while IFS= read -r s; do p=$(pac_of "$s"); echo "$p" | grep -qF "URL: $PAC_URL" && echo "$p" | grep -q "Enabled: Yes" && n=$((n+1)); done; echo "Claude Code: ${cc:-без прокси}; PAC туннеля включён на службах: $n"; }
+    scutil --proxy | grep -q "ProxyAutoConfigURLString : $PAC_URL" && echo "система применяет PAC туннеля" || echo "система PAC туннеля не применяет"
     ;;
   *)
     echo "mode.sh on | off"; exit 2 ;;
