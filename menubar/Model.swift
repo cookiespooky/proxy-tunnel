@@ -471,6 +471,7 @@ final class Model: ObservableObject {
             return
         }
         setupStep(2, true, "tinyproxy на 127.0.0.1:\(c.remotePort), пользователь \(c.user)")
+        let passwordOn = byPassword ? true : await ServerSetup.passwordEnabled(c, admin: admin, root: adminIsRoot)
 
         // 4. ключ входа для админа — не обязателен: неудача не останавливает настройку
         if wantAdminKey {
@@ -504,17 +505,14 @@ final class Model: ObservableObject {
             let why = tunnel.lastError.isEmpty ? "нет ответа через туннель" : tunnel.lastError
             setupStep(last, false, ip.isEmpty ? why : "выход \(ip), \(loc) — это Россия")
         }
-        // Вход по ключу уже известен — без ещё одного подключения (на сервере может быть ограничение частоты).
+        // «Доступ к серверу» — по тому, что настройка уже проверила, без новых подключений
+        // (на сервере может быть ограничение частоты). Повторная проверка — кнопкой «Проверить соединение».
         let keyWorks = !byPassword || (wantAdminKey && setupSteps[3].state == .ok)
         access = keyWorks ? .key(root: adminIsRoot) : .needPassword
-        if setupDone && keyWorks {
-            // Проверка соединения — сама, когда пройдут полминуты лимита после всплеска подключений настройки.
-            accessNote = "Через полминуты проверю вход по ключу — сразу после настройки сервер может ограничивать подключения."
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 35_000_000_000)
-                await self?.checkConnection()
-            }
-        }
+        keyStable = keyWorks
+        keyDenied = false
+        passwordLogin = byPassword ? true : passwordOn
+        accessNote = keyWorks ? "Вход по ключу проверен при настройке." : ""
     }
 
     /// Создаёт ключ входа приложения (если нет), кладёт его админу на сервер по паролю и проверяет вход по нему.
