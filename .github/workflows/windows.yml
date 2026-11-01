@@ -1,0 +1,31 @@
+# Сборка версии для Windows: на Mac её не собрать без .NET, поэтому — здесь.
+# Результат — один файл ProxyTunnel-windows.exe (артефакт сборки); в релиз его кладут руками.
+name: Windows build
+
+on:
+  push:
+    paths:
+      - 'windows/**'
+      - 'server/**'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Publish
+        run: >
+          dotnet publish windows/ProxyTunnel.csproj -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true -o out
+      - name: Rename
+        run: Rename-Item out/ProxyTunnel.exe ProxyTunnel-windows.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ProxyTunnel-windows
+          path: out/ProxyTunnel-windows.exe

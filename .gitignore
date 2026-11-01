@@ -8,3 +8,5 @@ id_ed25519*
 *.key
 vless.txt
 dist/
+windows/bin/
+windows/obj/
