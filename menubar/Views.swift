@@ -215,6 +215,7 @@ struct SettingsView: View {
     @State private var flashHost = false
     @State private var loaded = false
     @State private var confirmForget = false
+    @State private var confirmResetup = false
     @FocusState private var hostFocused: Bool
 
     private let plainInt = IntegerFormatStyle<Int>().grouping(.never)
@@ -305,6 +306,12 @@ struct SettingsView: View {
         // сохранённые настройки подставляются, только если правок нет. Сбросить правки — «Отменить».
         .onAppear { loadIfUntouched() }
         .onReceive(NotificationCenter.default.publisher(for: SettingsWindow.shown)) { _ in loadIfUntouched() }
+        .alert("Сервер уже настроен", isPresented: $confirmResetup) {
+            Button("Настроить заново") { runSetup() }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Прокси на сервере поставится заново, его настройки перезапишутся. Ключи и вход на сервер не пропадут, но туннель прервётся на несколько секунд. Нужно, если туннель перестал работать или сервер переустановили.")
+        }
         .alert("Забыть ключ сервера?", isPresented: $confirmForget) {
             Button("Забыть", role: .destructive) { m.forgetHostKey(); note = m.message }
             Button("Отмена", role: .cancel) {}
@@ -323,6 +330,8 @@ struct SettingsView: View {
 
     private var needPassword: Bool { m.access == .needPassword }
     private var hostEmpty: Bool { draft.hostTrimmed.isEmpty }
+    /// В поле адреса — уже настроенный сервер: повторная настройка только после подтверждения.
+    private var alreadySetUp: Bool { m.config.isComplete && draft.hostTrimmed == m.config.hostTrimmed }
 
     /// «Настроить сервер» без адреса: коротко подсветить поле адреса и поставить в него курсор.
     private func showHostMissing() {
@@ -378,10 +387,12 @@ struct SettingsView: View {
                 .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         HStack {
-            Button { hostEmpty ? showHostMissing() : runSetup() } label: {
+            Button {
+                if hostEmpty { showHostMissing() } else if alreadySetUp { confirmResetup = true } else { runSetup() }
+            } label: {
                 HStack(spacing: 6) {
                     if m.setupBusy { ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 14, height: 14) }
-                    Text(m.setupBusy ? "Настраиваю…" : "Настроить сервер")
+                    Text(m.setupBusy ? "Настраиваю…" : (alreadySetUp ? "Настроить заново…" : "Настроить сервер"))
                 }
             }
                 .buttonStyle(.borderedProminent)
