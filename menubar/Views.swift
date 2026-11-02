@@ -138,7 +138,7 @@ struct TunnelSetupCard: View {
     }
 }
 
-/// Окошко «?»: что это, как пользоваться, чьё.
+/// Окошко «?»: что это и как пользоваться. Ссылки подчёркнуты: в popover без этого они не отличаются от текста.
 struct AboutView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -155,19 +155,13 @@ struct AboutView: View {
             }
             .fixedSize(horizontal: false, vertical: true)
 
-            Link("Подробнее об инструменте", destination: Config.toolPageURL)
+            Link(destination: Config.toolPageURL) { Text("Подробнее об инструменте").underline() }
 
             Divider()
 
             HStack(spacing: 0) {
                 Text("Инструмент лаборатории ")
-                Link("Life OS", destination: Config.lifeOSURL)
-            }
-            HStack(spacing: 0) {
-                Text("Разработчик — Антон Ложкин: ")
-                Link("сайт", destination: Config.authorSiteURL)
-                Text(" · ")
-                Link("Telegram", destination: Config.authorTelegramURL)
+                Link(destination: Config.lifeOSURL) { Text("Life OS").underline() }
             }
         }
         .font(.system(size: 12))

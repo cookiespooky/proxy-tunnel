@@ -148,8 +148,6 @@ sealed class AboutForm : Form
         var lifeos = Link("Life OS", Config.LifeOSUrl);
         lifeos.Margin = new Padding(0, 12, 0, 3);
         col.Controls.Add(Ui.Row(lab, lifeos));
-        col.Controls.Add(Ui.Row(Ui.L("Разработчик — Антон Ложкин:", width: W),
-            Link("сайт", Config.AuthorSiteUrl), Link("Telegram", Config.AuthorTelegramUrl)));
         Controls.Add(col);
     }
 }

@@ -116,4 +116,4 @@ IP-адреса не сохраняются. Выключить — галочк
 ---
 
 Proxy Tunnel — инструмент лаборатории [Life OS](https://lifeos.antonlozhkin.ru/).
-[Подробнее об инструменте](https://antonlozhkin.ru/cases/proxy-tunnel/) — на сайте разработчика, Антона Ложкина.
+[Подробнее об инструменте](https://antonlozhkin.ru/cases/proxy-tunnel/).

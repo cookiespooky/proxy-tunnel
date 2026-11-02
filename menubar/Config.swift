@@ -46,8 +46,6 @@ struct Config: Codable, Equatable {
     /// Ссылки окошка «?»: страница инструмента, Life OS, автор.
     static let toolPageURL = URL(string: "https://antonlozhkin.ru/cases/proxy-tunnel/")!
     static let lifeOSURL = URL(string: "https://lifeos.antonlozhkin.ru/")!
-    static let authorSiteURL = URL(string: "https://antonlozhkin.ru/")!
-    static let authorTelegramURL = URL(string: "https://t.me/cookiespooky")!
 
     static var fileURL: URL { supportDir.appendingPathComponent("config.json") }
     static var knownHostsURL: URL { supportDir.appendingPathComponent("known_hosts") }

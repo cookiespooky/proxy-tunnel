@@ -71,8 +71,6 @@ public sealed class Config
     /// Ссылки окна «?»: страница инструмента, Life OS, автор.
     public const string ToolPageUrl = "https://antonlozhkin.ru/cases/proxy-tunnel/";
     public const string LifeOSUrl = "https://lifeos.antonlozhkin.ru/";
-    public const string AuthorSiteUrl = "https://antonlozhkin.ru/";
-    public const string AuthorTelegramUrl = "https://t.me/cookiespooky";
 
     [JsonIgnore] public string HostT => Host.Trim();
     [JsonIgnore] public string AdminT => string.IsNullOrWhiteSpace(AdminUser) ? "root" : AdminUser.Trim();
