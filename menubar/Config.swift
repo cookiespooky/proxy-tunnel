@@ -14,7 +14,8 @@ struct Config: Codable, Equatable {
     var adminUser = "root"    // кто настраивает сервер
     var adminKey = ""         // свой ключ входа на сервер; пусто — ~/.ssh, агент и ключ входа приложения
     var domains = ["claude.ai", "claude.com", "anthropic.com", "claudeusercontent.com", "claude.site",
-                   "threads.net", "threads.com"]
+                   "threads.net", "threads.com", "gemini.google.com", "aistudio.google.com",
+                   "chatgpt.com", "openai.com"]
 
     init() {}
 

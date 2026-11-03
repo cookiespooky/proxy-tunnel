@@ -64,7 +64,8 @@ public sealed class Config
     public int RemotePort { get; set; } = 8888;
     public int PacPort { get; set; } = 8889;
     public List<string> Domains { get; set; } = new()
-        { "claude.ai", "claude.com", "anthropic.com", "claudeusercontent.com", "claude.site", "threads.net", "threads.com" };
+        { "claude.ai", "claude.com", "anthropic.com", "claudeusercontent.com", "claude.site", "threads.net", "threads.com",
+          "gemini.google.com", "aistudio.google.com", "chatgpt.com", "openai.com" };
 
     /// Где взять сервер — показывается, пока сервер не задан (реферальная ссылка автора).
     public const string RentServerUrl = "https://cloud4box.com/?from=108671";
