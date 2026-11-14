@@ -13,9 +13,20 @@ struct Config: Codable, Equatable {
     var networkService = "Wi-Fi"   // не используется с 2026-11-01: PAC ставится на все службы
     var adminUser = "root"    // кто настраивает сервер
     var adminKey = ""         // свой ключ входа на сервер; пусто — ~/.ssh, агент и ключ входа приложения
-    var domains = ["claude.ai", "claude.com", "anthropic.com", "claudeusercontent.com", "claude.site",
-                   "threads.net", "threads.com", "gemini.google.com", "aistudio.google.com",
-                   "chatgpt.com", "openai.com"]
+    /// Стандартный список. Добавленный сюда адрес появится и у тех, кто ставил программу раньше, — один раз
+    /// (см. seenDefaults); удалённый человеком из своего списка обратно не вернётся.
+    static let defaultDomains = ["claude.ai", "claude.com", "anthropic.com", "claudeusercontent.com", "claude.site",
+                                 "threads.net", "threads.com", "gemini.google.com", "aistudio.google.com",
+                                 "chatgpt.com", "openai.com", "oaistatic.com", "oaiusercontent.com"]
+    var domains = Config.defaultDomains
+    /// Стандартные адреса, которые уже предлагались этой установке. В старых настройках поля нет — значит, пусто.
+    var seenDefaults = Config.defaultDomains
+    /// Что идёт через туннель, кроме сайтов из списка (Terminal.swift). Галочки действуют сразу, не через «Сохранить».
+    var claudeCode = true     // прокси в ~/.claude/settings.json
+    var codexCLI = true       // codex в терминале
+    var geminiCLI = true      // gemini в терминале
+    var vscodeCodex = false   // расширение Codex в VS Code — через посредник
+    var vscodeAll = false     // весь VS Code — через переменные при его запуске
 
     init() {}
 
@@ -34,7 +45,25 @@ struct Config: Codable, Equatable {
         adminUser = try c.decodeIfPresent(String.self, forKey: .adminUser) ?? d.adminUser
         adminKey = try c.decodeIfPresent(String.self, forKey: .adminKey) ?? d.adminKey
         domains = try c.decodeIfPresent([String].self, forKey: .domains) ?? d.domains
+        seenDefaults = try c.decodeIfPresent([String].self, forKey: .seenDefaults) ?? []
+        claudeCode = try c.decodeIfPresent(Bool.self, forKey: .claudeCode) ?? d.claudeCode
+        // До разделения была одна галочка cliProxy на codex и gemini — переносим её значение.
+        let legacy = try? AnyKey.decodeBool(decoder, "cliProxy")
+        codexCLI = try c.decodeIfPresent(Bool.self, forKey: .codexCLI) ?? legacy ?? d.codexCLI
+        geminiCLI = try c.decodeIfPresent(Bool.self, forKey: .geminiCLI) ?? legacy ?? d.geminiCLI
+        vscodeCodex = try c.decodeIfPresent(Bool.self, forKey: .vscodeCodex) ?? d.vscodeCodex
+        vscodeAll = try c.decodeIfPresent(Bool.self, forKey: .vscodeAll) ?? d.vscodeAll
     }
+
+    /// Галочки «что через туннель» и служебные поля, которых нет в окне настроек: «Сохранить» их не меняет.
+    func keepingToggles(of c: Config) -> Config {
+        var r = self
+        r.claudeCode = c.claudeCode; r.codexCLI = c.codexCLI; r.geminiCLI = c.geminiCLI
+        r.vscodeCodex = c.vscodeCodex; r.vscodeAll = c.vscodeAll; r.seenDefaults = c.seenDefaults
+        return r
+    }
+
+    var shell: CLIProxy.Shell { CLIProxy.Shell(codex: codexCLI, gemini: geminiCLI, vscodeAll: vscodeAll) }
 
     static let supportDir: URL = {
         let u = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -46,6 +75,10 @@ struct Config: Codable, Equatable {
     static let rentServerURL = URL(string: "https://cloud4box.com/?from=108671")!
     /// Ссылки окошка «?»: страница инструмента, Life OS, автор.
     static let toolPageURL = URL(string: "https://antonlozhkin.ru/cases/proxy-tunnel/")!
+    /// Разделы статьи — для кнопок «i» в настройках.
+    static let howURL = URL(string: "https://antonlozhkin.ru/cases/proxy-tunnel/#kak-rabotaet")!
+    static let routesURL = URL(string: "https://antonlozhkin.ru/cases/proxy-tunnel/#chto-idiot-cherez-server")!
+    static let limitsURL = URL(string: "https://antonlozhkin.ru/cases/proxy-tunnel/#ogranicheniia")!
     static let lifeOSURL = URL(string: "https://lifeos.antonlozhkin.ru/")!
 
     static var fileURL: URL { supportDir.appendingPathComponent("config.json") }
@@ -60,6 +93,16 @@ struct Config: Codable, Equatable {
     static func load() -> Config {
         var c = (try? Data(contentsOf: fileURL)).flatMap { try? JSONDecoder().decode(Config.self, from: $0) } ?? Config()
         if c.keyPath.isEmpty { c.keyPath = defaultKeyPath }
+        let fresh = defaultDomains.filter { !c.seenDefaults.contains($0) }
+        if !fresh.isEmpty {
+            let added = fresh.filter { !c.cleanDomains.contains($0) }
+            c.domains += added
+            c.seenDefaults += fresh
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                try? c.save()
+                if !added.isEmpty { Log.append("В список сайтов добавлены новые стандартные: \(added.joined(separator: ", "))") }
+            }
+        }
         return c
     }
 
@@ -116,5 +159,16 @@ enum Log {
                 try? line.write(to: url)
             }
         }
+    }
+}
+
+/// Чтение поля, которого больше нет среди свойств Config (для переноса старых настроек).
+private struct AnyKey: CodingKey {
+    var stringValue: String
+    var intValue: Int? { nil }
+    init(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { nil }
+    static func decodeBool(_ d: Decoder, _ k: String) throws -> Bool? {
+        try d.container(keyedBy: AnyKey.self).decodeIfPresent(Bool.self, forKey: AnyKey(stringValue: k))
     }
 }

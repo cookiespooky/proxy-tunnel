@@ -9,6 +9,7 @@ enum Palette {
     static let blue = Color(red: 0.10, green: 0.44, blue: 0.86)
     static let red = Color(red: 0.86, green: 0.22, blue: 0.22)
     static let orange = Color(red: 0.92, green: 0.52, blue: 0.10)
+    static let yellow = Color(red: 0.93, green: 0.70, blue: 0.08)
     static let card = Color.primary.opacity(0.06)
     static let sub = Color.primary.opacity(0.62)
 }
@@ -57,11 +58,16 @@ struct StatusCard: View {
         if m.checking { return ("Проверяю…", "", "", .secondary) }
         if m.verdictOK {
             let where_ = m.steps.count > 1 ? m.steps[1].detail : ""
+            if m.hasWarn {
+                return ("Туннель работает", "с оговоркой — см. жёлтое ниже", "exclamationmark.shield.fill", Palette.yellow)
+            }
             return ("Claude — через туннель", where_.isEmpty ? "" : "выход: \(where_)", "checkmark.shield.fill", Palette.green)
         }
         if m.steps.isEmpty { return ("Подключаюсь…", "", "hourglass", .secondary) }
-        if m.steps.count == 4, m.steps[0..<3].allSatisfy({ $0.state == .ok }), m.steps[3].state == .fail {
-            return ("Claude Code — через туннель", "Сайты из списка в браузере — нет, см. ниже",
+        // Не работают только сайты из списка (последний пункт) — Claude Code и остальное идут через туннель.
+        if let last = m.steps.last, last.state == .fail,
+           m.steps.dropLast().allSatisfy({ $0.state == .ok || $0.state == .warn }) {
+            return ("Туннель работает", "кроме сайтов из списка в браузере — см. ниже",
                     "exclamationmark.shield.fill", Palette.orange)
         }
         return ("Соединение не готово", "Исправьте отмеченное ниже", "xmark.shield.fill", Palette.red)
@@ -78,6 +84,7 @@ struct StepRow: View {
                 case .pending: Image(systemName: "circle").foregroundColor(.primary.opacity(0.3))
                 case .running: ProgressView().controlSize(.small).scaleEffect(0.65)
                 case .ok: Image(systemName: "checkmark.circle.fill").symbolRenderingMode(.palette).foregroundStyle(.white, Palette.green)
+                case .warn: Image(systemName: "exclamationmark.circle.fill").symbolRenderingMode(.palette).foregroundStyle(.white, Palette.yellow)
                 case .fail: Image(systemName: "xmark.circle.fill").symbolRenderingMode(.palette).foregroundStyle(.white, Palette.red)
                 }
             }
@@ -155,7 +162,7 @@ struct AboutView: View {
             }
             .fixedSize(horizontal: false, vertical: true)
 
-            Link(destination: Config.toolPageURL) { Text("Подробнее об инструменте").underline() }
+            Link(destination: Config.howURL) { Text("Как работает, что идёт через сервер, ограничения").underline() }
 
             Divider()
 
@@ -249,6 +256,36 @@ struct PanelView: View {
 
 enum SetupTab: String { case auto, manual }
 
+/// Подпись под настройкой: что произойдёт, коротко.
+struct Hint: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View {
+        Text(text).font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Кнопка «i» — раздел статьи о программе на сайте.
+struct InfoLink: View {
+    let url: URL
+    let help: String
+    var body: some View {
+        Link(destination: url) { Image(systemName: "info.circle") }
+            .help(help)
+            .foregroundColor(.secondary)
+    }
+}
+
+/// Заголовок раздела настроек с кнопкой «i» справа.
+struct InfoHeader: View {
+    let title: String
+    let url: URL
+    let help: String
+    var body: some View {
+        HStack { Text(title); Spacer(); InfoLink(url: url, help: help) }
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var m: Model
     @State private var draft = Config()
@@ -267,6 +304,11 @@ struct SettingsView: View {
 
     private let plainInt = IntegerFormatStyle<Int>().grouping(.never)
 
+    /// Галочка «что через туннель»: сохраняется сразу, туннель не переподключается.
+    private func toggle(_ title: String, _ k: WritableKeyPath<Config, Bool>) -> some View {
+        Toggle(title, isOn: Binding(get: { m.config[keyPath: k] }, set: { m.setToggle(k, $0) }))
+    }
+
     var body: some View {
         Form {
             Section {
@@ -275,7 +317,9 @@ struct SettingsView: View {
                     .padding(.vertical, 2)
                     .background(RoundedRectangle(cornerRadius: 6).fill(Palette.red.opacity(flashHost ? 0.18 : 0)))
                     .animation(.easeInOut(duration: 0.25), value: flashHost)
+                Hint("Ваш сервер за границей. Через него пойдут Claude и сайты из списка.")
                 TextField("SSH-порт", value: $draft.sshPort, format: plainInt)
+                Hint("Порт входа на сервер. Обычно 22 — менять, только если хостинг дал другой.")
                 if m.config.hostTrimmed.isEmpty {
                     HStack {
                         Text("Нет сервера? Подойдёт любой зарубежный VPS на Ubuntu или Debian.")
@@ -285,7 +329,13 @@ struct SettingsView: View {
                         Link("Арендовать сервер", destination: Config.rentServerURL)
                     }
                 }
-            } header: { StepHeader(n: 1, title: "Сервер", done: m.config.isComplete) }
+            } header: {
+                HStack {
+                    StepHeader(n: 1, title: "Сервер", done: m.config.isComplete)
+                    Spacer()
+                    InfoLink(url: Config.howURL, help: "Как работает туннель — статья на сайте")
+                }
+            }
 
             Section {
                 Picker("", selection: $tab) {
@@ -303,21 +353,49 @@ struct SettingsView: View {
 
             if m.config.isComplete { accessSection }
 
-            Section("Через туннель") {
+            Section {
+                toggle("Claude Code — через туннель", \.claudeCode)
+                Hint("Claude Code в терминале и в VS Code идёт через сервер целиком, кроме российских сайтов. Программа пишет адрес в ~/.claude/settings.json. Выключено — напрямую. После переключения перезапустите Claude Code.")
+                toggle("Codex в терминале — через туннель", \.codexCLI)
+                Hint("Команда codex идёт через сервер целиком, пока туннель включён, — и при VPN тоже. В окнах терминала, открытых после включения. Программа добавляет строки в ~/.zshrc; выключите — уберёт.")
+                toggle("Gemini в терминале — через туннель", \.geminiCLI)
+                Hint("Команда gemini — так же, как codex.")
                 TextEditor(text: $domainsText)
                     .font(.system(.body, design: .monospaced))
                     .frame(height: 120)
-                Text("В браузере и приложении Claude через туннель идут только эти сайты; остальные открываются напрямую, как без туннеля, — заблокированный сайт, которого нет в списке, не откроется. По одному домену в строке, поддомены включаются. Claude Code ходит через туннель целиком, кроме российских доменов.")
-                    .font(.caption).foregroundColor(.secondary)
+                Hint("Браузер и приложение Claude: эти сайты — через сервер, остальные — напрямую. Один домен в строке, поддомены включаются. Пока включён VPN, список не действует. Изменения — после «Сохранить».")
+            } header: {
+                InfoHeader(title: "Через туннель", url: Config.routesURL, help: "Что идёт через сервер — статья на сайте")
             }
 
-            Section("Дополнительно") {
-                TextField("Пользователь туннеля", text: $draft.user)
-                TextField("Интерфейс для туннеля", text: $draft.interface, prompt: Text("автоматически"))
-                TextField("Порт туннеля на Маке", value: $draft.localPort, format: plainInt)
-                TextField("Порт прокси на сервере", value: $draft.remotePort, format: plainInt)
+            Section {
+                Hint("Claude Code в VS Code — по галочке «Claude Code» выше. Остальное в VS Code само по себе идёт напрямую.")
+                toggle("Codex в VS Code — через туннель", \.vscodeCodex)
+                Hint("Расширение Codex запускается через посредника Proxy Tunnel и идёт через сервер, пока туннель включён. Программа пишет одну строку в настройки VS Code (служебная настройка расширения — может перестать работать после его обновления, проверка это покажет). После переключения перезапустите VS Code.")
+                toggle("Весь VS Code — через туннель", \.vscodeAll)
+                Hint("Всё, что делает VS Code, — любые расширения (Gemini, Copilot и другие), их загрузка и команды в его терминале — идёт через сервер. Действует, если открыть VS Code из Dock при включённом туннеле. Выключили туннель при открытом VS Code — он останется без сети до перезапуска.")
+            } header: {
+                InfoHeader(title: "VS Code", url: Config.routesURL, help: "Что идёт через сервер — статья на сайте")
+            }
+
+            Section {
+                Hint("Менять не нужно, если всё работает. Любое изменение — после «Сохранить», туннель переподключится.")
+                Group {
+                    TextField("Пользователь туннеля", text: $draft.user)
+                    Hint("Под этим именем программа держит туннель. На сервере ему разрешён только туннель.")
+                    TextField("Интерфейс для туннеля", text: $draft.interface, prompt: Text("автоматически"))
+                    Hint("Через какую сеть идёт связь с сервером. Пусто — программа сама выбирает прямую сеть, мимо VPN.")
+                    TextField("Порт туннеля на Маке", value: $draft.localPort, format: plainInt)
+                    Hint("Адрес 127.0.0.1:порт на этом Маке — через него идут Claude Code, codex и gemini. Менять, если порт занят.")
+                    TextField("Порт прокси на сервере", value: $draft.remotePort, format: plainInt)
+                    Hint("Куда на сервере ведёт туннель. Должен совпадать с настройкой сервера.")
+                }
                 TextField("Порт PAC", value: $draft.pacPort, format: plainInt)
+                Hint("Отсюда браузер берёт список сайтов для туннеля.")
                 Button("Забыть ключ сервера…") { confirmForget = true }
+                Hint("Только если сервер переустановили и программа пишет, что его ключ изменился.")
+            } header: {
+                InfoHeader(title: "Дополнительно", url: Config.limitsURL, help: "Ограничения — статья на сайте")
             }
 
             if !note.isEmpty {
@@ -336,6 +414,7 @@ struct SettingsView: View {
                     get: { m.launchAtLogin },
                     set: { m.launchAtLogin = $0 }
                 ))
+                Hint("Программа откроется сама после включения Мака. Туннель при этом выключен — включается нажатием на карточку.")
                 Toggle("Отправлять анонимную статистику", isOn: Binding(
                     get: { Update.sendStats },
                     set: { Update.sendStats = $0; m.objectWillChange.send() }
@@ -350,7 +429,7 @@ struct SettingsView: View {
                     Text("Выйти из Proxy Tunnel").foregroundColor(Palette.red).frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderless)
-                Text("Туннель закроется, прокси для Claude и браузера снимутся.")
+                Text("Туннель закроется: всё пойдёт напрямую.")
                     .font(.caption).foregroundColor(.secondary).frame(maxWidth: .infinity)
             }
         }
@@ -519,7 +598,7 @@ struct SettingsView: View {
         c.host = c.hostTrimmed
         c.domains = domainsText.split(separator: "\n").map(String.init)
         c.domains = c.cleanDomains
-        return c
+        return c.keepingToggles(of: m.config)   // галочки — не часть черновика, действуют сразу
     }
 
     /// Есть ли в окне несохранённые правки (пароль в настройки не входит и не сбрасывается вовсе).
@@ -636,6 +715,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var item: NSStatusItem?
     private let popover = NSPopover()
     private var watch: AnyCancellable?
+    private var dotView: NSView?
     private var model: Model?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -656,9 +736,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.behavior = .transient                 // щелчок мимо — закрывается, как у меню
         popover.animates = false
 
-        setIcon(m.icon)
+        setIcon(m.icon, m.dot)
         watch = m.objectWillChange.sink { [weak self] _ in
-            DispatchQueue.main.async { self?.setIcon(m.icon) }
+            DispatchQueue.main.async { self?.setIcon(m.icon, m.dot) }
         }
         // Настроенный туннель: сразу показать панель (туннель при запуске выключен — включают по карточке).
         // Ненастроенный: как раньше, откроется окно настроек.
@@ -667,10 +747,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func setIcon(_ name: String) {
+    /// Значок — как был (шаблонный, его рисует система); точка состояния — отдельным слоем в правом нижнем углу.
+    private func setIcon(_ name: String, _ dot: Model.Dot?) {
         let img = NSImage(systemSymbolName: name, accessibilityDescription: "Proxy Tunnel")
         img?.isTemplate = true
-        item?.button?.image = img
+        guard let b = item?.button else { return }
+        b.image = img
+        let d: CGFloat = 7
+        if dotView == nil {
+            let v = NSView(frame: .zero)
+            v.wantsLayer = true
+            v.layer?.cornerRadius = d / 2
+            b.addSubview(v)
+            dotView = v
+        }
+        guard let v = dotView else { return }
+        v.frame = NSRect(x: b.bounds.maxX - d - 2, y: b.isFlipped ? b.bounds.maxY - d - 2 : 2, width: d, height: d)
+        v.isHidden = dot == nil
+        let c: NSColor
+        switch dot {
+        case .green: c = NSColor(srgbRed: 0.20, green: 0.70, blue: 0.40, alpha: 1)
+        case .yellow: c = NSColor(srgbRed: 0.96, green: 0.74, blue: 0.10, alpha: 1)
+        case .red, .none: c = NSColor(srgbRed: 0.90, green: 0.25, blue: 0.25, alpha: 1)
+        }
+        v.layer?.backgroundColor = c.cgColor
+        b.setAccessibilityLabel("Proxy Tunnel: " + (dot == .green ? "всё через туннель" : dot == .yellow ? "туннель работает с оговоркой" : dot == .red ? "туннель выключен или не работает" : "не настроен"))
     }
 
     func showPanel() {

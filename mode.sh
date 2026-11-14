@@ -1,8 +1,9 @@
 #!/bin/bash
 # Включает и снимает прокси туннеля для Claude Code и браузера — то же, что делает приложение
 # (само включает, когда сервер настроен, и снимает при выходе). Нужен, если приложение закрыли аварийно.
-#   mode.sh on   — прокси в ~/.claude/settings.json и PAC на всех сетевых службах (VPN тоже; чужой PAC не трогается)
-#   mode.sh off  — снять прокси и выключить PAC там, где стоит наш
+#   mode.sh on   — прокси в ~/.claude/settings.json и PAC на всех сетевых службах (VPN тоже; чужой PAC не трогается);
+#                  codex, gemini и VS Code — через туннель там, где это включено галочками программы
+#   mode.sh off  — снять прокси и выключить PAC там, где стоит наш; codex и gemini — напрямую
 #   mode.sh      — показать, включено ли
 # Сервер, порты и службу берёт из настроек приложения.
 set -e
@@ -17,6 +18,7 @@ services() { networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*'; 
 pac_of() { networksetup -getautoproxyurl "$1"; }
 PROXY="http://127.0.0.1:$LOCAL"
 PAC_URL="http://127.0.0.1:$PACP/proxy.pac"
+CLI_STATE="$HOME/Library/Application Support/Proxy Tunnel/cli-proxy"   # его читают блок в ~/.zshrc и посредник Codex для VS Code
 
 set_env() {  # $1 = on | off
   python3 - "$S" "$1" "$PROXY" "$HOST" <<'PY'
@@ -41,7 +43,8 @@ PY
 case "$1" in
   on)
     [ -n "$HOST" ] || { echo "В настройках приложения не указан сервер."; exit 2; }
-    set_env on
+    [ "$(conf claudeCode True)" = "True" ] && set_env on
+    printf '%s' "$PROXY" > "$CLI_STATE"   # без галочек codex, gemini и VS Code его никто не читает
     services | while IFS= read -r s; do
       p=$(pac_of "$s")
       if echo "$p" | grep -q "Enabled: Yes" && ! echo "$p" | grep -qF "URL: $PAC_URL"; then echo "пропущена (чужой PAC): $s"; continue; fi
@@ -51,11 +54,12 @@ case "$1" in
     ;;
   off)
     set_env off
+    rm -f "$CLI_STATE"
     services | while IFS= read -r s; do
       pac_of "$s" | grep -qF "URL: $PAC_URL" && networksetup -setautoproxystate "$s" off
     done
     rm -f "$HOME/Library/Application Support/Proxy Tunnel/pac-services.json"
-    echo "Снято. Claude Code и браузер ходят напрямую."
+    echo "Снято. Всё ходит напрямую."
     ;;
   "")
     cc=$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.claude/settings.json"))).get("env",{}).get("HTTPS_PROXY",""))' 2>/dev/null)

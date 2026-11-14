@@ -2,7 +2,8 @@
 import SwiftUI
 import ServiceManagement
 
-enum StepState { case pending, running, ok, fail }
+/// warn — работает, но с оговоркой (жёлтый «!»): например, браузер идёт через VPN, а не через туннель.
+enum StepState { case pending, running, ok, warn, fail }
 
 struct Step: Identifiable {
     let id: Int
@@ -97,7 +98,11 @@ enum ClaudeSettings {
     }
 }
 
-let tunnelSteps = ["Туннель подключён", "Выход через туннель", "Claude Code → туннель", "Сайты из списка → туннель"]
+// Порядок в панели: туннель, выход, Claude Code, Codex и Gemini, VS Code (каждый — если включён и есть), сайты из списка.
+let tunnelSteps = ["Туннель подключён", "Выход через туннель"]
+let claudeStep = "Claude Code → туннель"
+let vscodeStep = "VS Code → туннель"
+let sitesStep = "Сайты из списка → туннель"
 
 @MainActor
 final class Model: ObservableObject {
@@ -112,7 +117,10 @@ final class Model: ObservableObject {
     /// Туннель только что включили — сказать об этом, когда закончатся проверки.
     private var announceOn = false
     @Published var steps: [Step] = []
+    /// Всё работает (зелёные и жёлтые пункты).
     @Published var verdictOK = false
+    /// Есть жёлтые пункты — работает с оговоркой.
+    @Published var hasWarn = false
     @Published var busy = false
     @Published var checking = false
     @Published var message = ""
@@ -173,6 +181,17 @@ final class Model: ObservableObject {
         return verdictOK ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
     }
 
+    /// Точка у значка: зелёная — всё через туннель; жёлтая — туннель работает с оговоркой (VPN);
+    /// красная — туннель выключен или не работает. Не настроен — без точки.
+    enum Dot { case green, yellow, red }
+    var dot: Dot? {
+        guard config.isComplete else { return nil }
+        guard enabled else { return .red }
+        if steps.isEmpty { return .yellow }   // подключается
+        if !verdictOK { return .red }
+        return hasWarn ? .yellow : .green
+    }
+
     /// Нажатие на верхнюю карточку: включить или выключить туннель.
     func toggleTunnel() {
         guard config.isComplete, !busy else { return }
@@ -191,6 +210,7 @@ final class Model: ObservableObject {
             await removeSystemSettings()
             steps = []
             verdictOK = false
+            hasWarn = false
             checkedAt = nil
             return
         }
@@ -205,6 +225,8 @@ final class Model: ObservableObject {
     }
 
     func apply(_ c: Config) {
+        var c = c
+        c = c.keepingToggles(of: config)    // галочки сохраняются сразу, не через «Сохранить»
         config = c
         do { try c.save() } catch { message = "Настройки не сохранились: \(error.localizedDescription)" }
         Task { await startServices() }
@@ -275,11 +297,8 @@ final class Model: ObservableObject {
 
     /// Включает прокси для Claude Code и PAC на всех службах, если чего-то нет (сбросили, появился новый VPN).
     private func applySystemSettings() async -> String? {
-        let ccWasSet = ClaudeSettings.proxy() == config.proxyURL
-        if !ccWasSet {
-            do { try ClaudeSettings.set(proxy: config.proxyURL, host: config.hostTrimmed) }
-            catch { return error.localizedDescription }
-        }
+        let ccWasSet = !config.claudeCode || ClaudeSettings.proxy() == config.proxyURL
+        if let e = applyIntegrations(on: true) { return e }
         let url = config.pacURL
         let r = await Task.detached { Model.applyPAC(url) }.value
         foreignPAC = r.foreign
@@ -293,6 +312,7 @@ final class Model: ObservableObject {
     /// Выключение туннеля: снять прокси для Claude Code и вернуть службам прежний PAC.
     func removeSystemSettings() async {
         if ClaudeSettings.proxy() == config.proxyURL { try? ClaudeSettings.set(proxy: nil, host: config.hostTrimmed) }
+        CLIProxy.setState(nil)
         let url = config.pacURL
         await Task.detached { Model.removePAC(url) }.value
         applied = false
@@ -302,8 +322,44 @@ final class Model: ObservableObject {
     /// Синхронно — приложение уже закрывается.
     func removeSystemSettingsSync() {
         if ClaudeSettings.proxy() == config.proxyURL { try? ClaudeSettings.set(proxy: nil, host: config.hostTrimmed) }
+        CLIProxy.setState(nil)
         Model.removePAC(config.pacURL)
         applied = false
+    }
+
+    /// Claude Code, Codex, Gemini, VS Code — по галочкам. on — туннель включён: адрес прокси для них записан.
+    /// Вызывается при каждой проверке — восстанавливает стёртое.
+    @discardableResult
+    private func applyIntegrations(on: Bool) -> String? {
+        var errors: [String] = []
+        let cc = ClaudeSettings.proxy()
+        if on && config.claudeCode {
+            if cc != config.proxyURL {
+                do { try ClaudeSettings.set(proxy: config.proxyURL, host: config.hostTrimmed) }
+                catch { errors.append(error.localizedDescription) }
+            }
+        } else if cc == config.proxyURL {
+            try? ClaudeSettings.set(proxy: nil, host: config.hostTrimmed)
+        }
+        do { try CLIProxy.install(config.shell) }
+        catch { errors.append("Терминал: не удалось записать настройки — \(error.localizedDescription)") }
+        if config.vscodeCodex {
+            do { try CLIProxy.enableVSCodeCodex() }
+            catch { errors.append("Codex в VS Code: \(error.localizedDescription)") }
+        } else {
+            CLIProxy.disableVSCodeCodex()
+        }
+        let anyCLI = config.shell.any || config.vscodeCodex
+        CLIProxy.setState(on && anyCLI ? config.proxyURL : nil)
+        return errors.isEmpty ? nil : errors.joined(separator: "; ")
+    }
+
+    /// Галочки «что через туннель»: действуют сразу, туннель не переподключается.
+    func setToggle(_ k: WritableKeyPath<Config, Bool>, _ v: Bool) {
+        config[keyPath: k] = v
+        do { try config.save() } catch { message = "Настройки не сохранились: \(error.localizedDescription)" }
+        if let e = applyIntegrations(on: applied) { message = e }
+        refresh()
     }
 
     func reconnect() {
@@ -339,8 +395,8 @@ final class Model: ObservableObject {
         }
     }
 
-    private func step(_ i: Int, _ ok: Bool, _ detail: String = "") async {
-        work[i].state = ok ? .ok : .fail
+    private func step(_ i: Int, _ ok: Bool, _ detail: String = "", warn: Bool = false) async {
+        work[i].state = !ok ? .fail : (warn ? .warn : .ok)
         work[i].detail = detail
         if i + 1 < work.count { work[i + 1].state = .running }
         publish()
@@ -352,7 +408,17 @@ final class Model: ObservableObject {
     }
 
     private func checkTunnel() async {
-        work = makeSteps(tunnelSteps)
+        let cliCodex = config.codexCLI && CLIProxy.codexDetected()
+        let cliGemini = config.geminiCLI && CLIProxy.geminiDetected()
+        let cliTitle = [cliCodex ? "Codex" : nil, cliGemini ? "Gemini" : nil].compactMap { $0 }.joined(separator: " и ")
+        let showVSCode = config.vscodeCodex || config.vscodeAll
+        var titles = tunnelSteps
+        if config.claudeCode { titles.append(claudeStep) }
+        if !cliTitle.isEmpty { titles.append("\(cliTitle) в терминале → туннель") }
+        if showVSCode { titles.append(vscodeStep) }
+        titles.append(sitesStep)
+        work = makeSteps(titles)
+        var i = 0
         work[0].state = .running
         publish()
         if !quiet { try? await Task.sleep(nanoseconds: 150_000_000) }
@@ -362,7 +428,7 @@ final class Model: ObservableObject {
         if !tunnel.running { t1 = tunnel.lastError.isEmpty ? "ssh не запущен" : tunnel.lastError }
         else if !port { t1 = "порт \(config.localPort) не отвечает" }
         else { t1 = await tunnelRoute() }
-        await step(0, tunnel.running && port, t1)
+        await step(i, tunnel.running && port, t1); i += 1
 
         // Доказательство для всего, что идёт через прокси: claude.ai видит адрес сервера, а не VPN и не Россию.
         let (ip, loc) = await traceViaTunnel()
@@ -371,14 +437,63 @@ final class Model: ObservableObject {
         let ipOK = !ip.isEmpty && loc != "RU" && (expected == nil || ip == expected)
         var t2 = ip.isEmpty ? "нет ответа" : "\(ip), \(loc)"
         if !ip.isEmpty && !ipOK, let e = expected { t2 += " — ожидался \(e)" }
-        await step(1, ipOK, t2)
+        await step(i, ipOK, t2); i += 1
 
         // Claude Code берёт прокси из своих настроек — VPN на это не влияет.
-        let cc = ClaudeSettings.proxy()
-        await step(2, cc == config.proxyURL, cc == config.proxyURL ? "прокси в ~/.claude/settings.json" : "прокси не задан — Claude Code пойдёт мимо туннеля")
+        if config.claudeCode {
+            let cc = ClaudeSettings.proxy()
+            await step(i, cc == config.proxyURL, cc == config.proxyURL
+                       ? "в терминале и в VS Code, целиком. Прокси в ~/.claude/settings.json"
+                       : "прокси не задан — Claude Code пойдёт мимо туннеля"); i += 1
+        }
+
+        // Codex и Gemini в терминале: блок в файлах терминала и адрес прокси для него.
+        if !cliTitle.isEmpty {
+            let block = CLIProxy.installed(config.shell)
+            let state = CLIProxy.state() == config.proxyURL
+            let codexOK = !cliCodex || !CLIProxy.codexIgnoresEnv()
+            let what = cliTitle == "Codex и Gemini" ? "codex и gemini" : cliTitle.lowercased()
+            var t: String
+            if !block { t = "блок в ~/.zshrc не найден — \(what) пойдут напрямую" }
+            else if !state { t = "адрес прокси для терминала не записан — \(what) пойдут напрямую" }
+            else if !codexOK { t = "в ~/.codex/config.toml включён respect_system_proxy — с ним Codex идёт мимо туннеля; уберите эту строку" }
+            else { t = "целиком, в окнах терминала, открытых после включения" }
+            await step(i, block && state && codexOK, t); i += 1
+        }
+
+        // VS Code: смотрим окружение запущенных процессов — это и есть то, как они ходят на самом деле.
+        if showVSCode {
+            var notes: [String] = [], ok = true, warn = false
+            if config.vscodeCodex {
+                if !CLIProxy.vscodeCodexOn() {
+                    ok = false; notes.append("Codex: строка в настройках VS Code не записана")
+                } else {
+                    let used = await Task.detached(operation: { [p = config.proxyURL] in CLIProxy.processesUseProxy(matching: "openai.chatgpt-", proxy: p) }).value
+                    switch used {
+                    case .some(true): notes.append("Codex — через туннель")
+                    case .some(false): warn = true; notes.append("Codex — пока напрямую: перезапустите VS Code")
+                    case .none: notes.append("Codex — через туннель с запуска VS Code")
+                    }
+                }
+            }
+            if config.vscodeAll {
+                if !CLIProxy.installed(config.shell) {
+                    ok = false; notes.append("весь VS Code: блок в ~/.zshrc не найден")
+                } else {
+                    let used = await Task.detached(operation: { [p = config.proxyURL] in CLIProxy.processesUseProxy(matching: "Code Helper (Plugin)", proxy: p) }).value
+                    switch used {
+                    case .some(true): notes.append("весь VS Code — через туннель")
+                    case .some(false): warn = true; notes.append("весь VS Code — пока напрямую: закройте VS Code и откройте из Dock")
+                    case .none: notes.append("весь VS Code — через туннель с запуска из Dock")
+                    }
+                }
+            }
+            await step(i, ok, notes.joined(separator: "; "), warn: warn); i += 1
+        }
 
         // Браузер и приложение Claude берут прокси из системы. Смотрим не настройку Wi-Fi, а то, что система
         // применяет на самом деле: VPN-клиент в режиме TUN становится основным интерфейсом, и PAC Wi-Fi игнорируется.
+        // Это не поломка: браузер просто идёт через VPN — жёлтый пункт, а не красный.
         let (_, eff) = await run(["/usr/sbin/scutil", "--proxy"])
         func flag(_ k: String) -> Bool { eff.contains("\(k) : 1") }
         let pacOn = flag("ProxyAutoConfigEnable") && eff.contains("ProxyAutoConfigURLString : \(config.pacURL)")
@@ -386,25 +501,27 @@ final class Model: ObservableObject {
         let (_, pacBody) = await run(["/usr/bin/curl", "-s", "--noproxy", "*", "--max-time", "3", config.pacURL])
         let served = pacBody.contains("PROXY 127.0.0.1:\(config.localPort)")
         let viaVPN = await defaultRouteIsVPN()
-        let t4: String
-        if !pacOn {
-            t4 = viaVPN
-                ? "Включён VPN, и система не применяет PAC: браузер и приложение Claude идут через VPN, а не через туннель. Выключите VPN — Claude Code при этом и так идёт через туннель."
-                : (foreignPAC.isEmpty ? "Система не применяет PAC туннеля"
-                   : "На службе «\(foreignPAC.joined(separator: "», «"))» уже стоит другой PAC — приложение его не трогает")
+        var t4: String, okSites = pacOn && !manual && served, warnSites = false
+        if !pacOn && viaVPN {
+            okSites = true; warnSites = true
+            t4 = "Включён VPN: браузер и приложение Claude идут через VPN, а не через туннель. Через туннель — после выключения VPN"
+        } else if !pacOn {
+            t4 = foreignPAC.isEmpty ? "Система не применяет PAC туннеля"
+                : "На службе «\(foreignPAC.joined(separator: "», «"))» уже стоит другой PAC — приложение его не трогает"
         } else if manual {
             t4 = "В системе включён ещё и обычный прокси (VPN-клиент?) — браузер может пойти через него"
         } else if !served {
             t4 = pac.error.isEmpty ? "PAC не раздаётся — эти сайты не откроются" : pac.error
         } else {
-            // Не «весь браузер»: через туннель только сайты из списка, остальные — напрямую, без обхода блокировок.
+            // Не «весь браузер»: через туннель только сайты из списка, остальные — напрямую.
             let list = config.cleanDomains
             let shown = list.prefix(3).joined(separator: ", ") + (list.count > 3 ? " и ещё \(list.count - 3)" : "")
-            t4 = "в браузере и приложении Claude: \(shown). Остальные сайты — напрямую, как без туннеля; добавить — Настройки → «Через туннель»"
+            t4 = "в браузере и приложении Claude: \(shown). Остальное — напрямую; добавить — Настройки → «Через туннель»"
         }
-        await step(3, pacOn && !manual && served, t4)
+        await step(i, okSites, t4, warn: warnSites)
 
-        verdictOK = work.allSatisfy { $0.state == .ok }
+        verdictOK = work.allSatisfy { $0.state == .ok || $0.state == .warn }
+        hasWarn = work.contains { $0.state == .warn }
     }
 
     // MARK: настройка сервера из приложения

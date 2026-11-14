@@ -6,7 +6,7 @@ APP="build/Proxy Tunnel.app"
 rm -rf build && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp ../server/*.sh "$APP/Contents/Resources/"   # скрипты сервера — общие для всех версий
 for arch in x86_64 arm64; do
-  swiftc -O -parse-as-library -target "$arch-apple-macos13.0" Config.swift Net.swift Tunnel.swift Setup.swift Model.swift Views.swift Update.swift -o "build/tunnel-$arch"
+  swiftc -O -parse-as-library -target "$arch-apple-macos13.0" Config.swift Net.swift Tunnel.swift Setup.swift Model.swift Views.swift Update.swift Terminal.swift -o "build/tunnel-$arch"
 done
 lipo -create build/tunnel-x86_64 build/tunnel-arm64 -output "$APP/Contents/MacOS/ProxyTunnel"
 rm build/tunnel-*
@@ -18,8 +18,8 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
   <key>CFBundleName</key><string>Proxy Tunnel</string>
   <key>CFBundleExecutable</key><string>ProxyTunnel</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.2.1</string>
-  <key>CFBundleVersion</key><string>4</string>
+  <key>CFBundleShortVersionString</key><string>1.3</string>
+  <key>CFBundleVersion</key><string>5</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
 </dict></plist>
