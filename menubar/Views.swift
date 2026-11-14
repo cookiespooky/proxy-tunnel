@@ -578,6 +578,57 @@ struct SettingsView: View {
 
 }
 
+/// Только один экземпляр. «Открывать при входе» запоминается за каждой копией приложения отдельно
+/// (SMAppService — по пути), поэтому после обновления или пересборки при входе стартуют сразу две копии:
+/// два значка, два ssh на одном пробросе гасят друг друга, PAC-порт держит та, что успела первой.
+/// Все копии выбирают одного победителя одинаково: новее сборка → лежит в /Applications → раньше запущена (меньше pid).
+/// Проигравший молча выходит до создания Model; победитель закрывает остальных — и старые копии без этой проверки —
+/// и ждёт их выхода: старая копия при выходе снимает системные настройки, это должно случиться до наших.
+@MainActor
+enum SingleInstance {
+    private struct Rank: Comparable {
+        let build: Int, inApplications: Bool, pid: pid_t
+        static func < (a: Rank, b: Rank) -> Bool {
+            if a.build != b.build { return a.build < b.build }
+            if a.inApplications != b.inApplications { return !a.inApplications }
+            return a.pid > b.pid
+        }
+    }
+
+    private static func rank(_ a: NSRunningApplication) -> Rank {
+        let url = a.bundleURL
+        let info = url.flatMap { NSDictionary(contentsOf: $0.appendingPathComponent("Contents/Info.plist")) }
+        let build = Int(info?["CFBundleVersion"] as? String ?? "") ?? 0
+        let inApps = url?.path.hasPrefix("/Applications/") ?? false
+        return Rank(build: build, inApplications: inApps, pid: a.processIdentifier)
+    }
+
+    static func resolve(then proceed: @escaping @MainActor () -> Void) {
+        let me = NSRunningApplication.current
+        guard let id = Bundle.main.bundleIdentifier else { return proceed() }
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: id)
+            .filter { $0.processIdentifier != me.processIdentifier && !$0.isTerminated }
+        guard !others.isEmpty else { return proceed() }
+
+        let mine = rank(me)
+        if others.contains(where: { rank($0) > mine }) {
+            Log.append("Уже запущена более новая или основная копия Proxy Tunnel — эта (\(Bundle.main.bundlePath)) выходит")
+            exit(0)
+        }
+        for o in others {
+            Log.append("Закрываю вторую копию Proxy Tunnel: \(o.bundleURL?.path ?? "pid \(o.processIdentifier)")")
+            o.terminate()
+        }
+        let pids = others.map(\.processIdentifier)
+        DispatchQueue.global().async {
+            let alive = { pids.filter { kill($0, 0) == 0 } }
+            for _ in 0..<50 where !alive().isEmpty { usleep(100_000) }
+            for p in alive() { kill(p, SIGKILL) }
+            DispatchQueue.main.async { proceed() }
+        }
+    }
+}
+
 /// Значок в строке меню и панель под ним — своими силами, а не MenuBarExtra:
 /// панель MenuBarExtra нельзя открыть из кода, а её нужно показать сразу при запуске.
 @MainActor
@@ -588,6 +639,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var model: Model?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        SingleInstance.resolve { [weak self] in self?.setUp() }
+    }
+
+    private func setUp() {
         let m = Model()
         model = m
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
