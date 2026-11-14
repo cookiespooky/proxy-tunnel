@@ -63,10 +63,19 @@ public sealed class Config
     public int LocalPort { get; set; } = 8888;
     public int RemotePort { get; set; } = 8888;
     public int PacPort { get; set; } = 8889;
-    public List<string> Domains { get; set; } = new()
+    /// Стандартный список. Добавленный сюда адрес появится и у тех, кто ставил программу раньше, — один раз
+    /// (см. SeenDefaults); удалённый человеком из своего списка обратно не вернётся.
+    public static readonly string[] DefaultDomains =
         { "claude.ai", "claude.com", "anthropic.com", "claudeusercontent.com", "claude.site", "threads.net", "threads.com",
           "gemini.google.com", "aistudio.google.com", "chatgpt.com", "openai.com",
           "oaistatic.com", "oaiusercontent.com" };
+    public List<string> Domains { get; set; } = new(DefaultDomains);
+    /// Стандартные адреса, которые уже предлагались этой установке; в старых настройках поля нет — null.
+    public List<string>? SeenDefaults { get; set; }
+    /// Что идёт через туннель, кроме сайтов из списка (Terminal.cs). Галочки действуют сразу, не через «Сохранить».
+    public bool ClaudeCode { get; set; } = true;
+    public bool CodexCLI { get; set; } = true;
+    public bool GeminiCLI { get; set; } = true;
 
     /// Где взять сервер — показывается, пока сервер не задан (реферальная ссылка автора).
     public const string RentServerUrl = "https://cloud4box.com/?from=108671";
@@ -102,8 +111,26 @@ public sealed class Config
 
     public static Config Load()
     {
-        try { return JsonSerializer.Deserialize<Config>(File.ReadAllText(Paths.ConfigFile)) ?? new Config(); }
-        catch { return new Config(); }
+        var exists = File.Exists(Paths.ConfigFile);
+        Config c;
+        try { c = exists ? JsonSerializer.Deserialize<Config>(File.ReadAllText(Paths.ConfigFile)) ?? new Config() : new Config(); }
+        catch { c = new Config(); }
+        // Новая установка уже видела весь стандартный список; старая — ни одного адреса из него.
+        c.SeenDefaults ??= exists ? new List<string>() : new List<string>(DefaultDomains);
+        var fresh = DefaultDomains.Where(d => !c.SeenDefaults.Contains(d)).ToList();
+        if (fresh.Count > 0)
+        {
+            var have = c.CleanDomains();
+            var added = fresh.Where(d => !have.Contains(d)).ToList();
+            c.Domains.AddRange(added);
+            c.SeenDefaults.AddRange(fresh);
+            if (exists)
+            {
+                try { c.Save(); } catch { }
+                if (added.Count > 0) Log.Append("В список сайтов добавлены новые стандартные: " + string.Join(", ", added));
+            }
+        }
+        return c;
     }
 
     public void Save() => File.WriteAllText(Paths.ConfigFile, JsonSerializer.Serialize(this, Opts));

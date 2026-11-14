@@ -56,8 +56,10 @@ public sealed class Core
     public string AccessNote = "";
     bool adminIsRoot = true;
 
-    public static readonly string[] TunnelSteps =
-        { "Туннель подключён", "Выход через туннель", "Claude Code → туннель", "Сайты из списка → туннель" };
+    // Порядок в панели: туннель, выход, Claude Code, codex и gemini (каждый — если включён и есть), сайты из списка.
+    public static readonly string[] TunnelSteps = { "Туннель подключён", "Выход через туннель" };
+    const string ClaudeStep = "Claude Code → туннель";
+    const string SitesStep = "Сайты из списка → туннель";
 
     public Core()
     {
@@ -127,6 +129,9 @@ public sealed class Core
 
     public void Apply(Config c)
     {
+        // галочки сохраняются сразу, не через «Сохранить»: из черновика их не берём
+        c.ClaudeCode = Config.ClaudeCode; c.CodexCLI = Config.CodexCLI; c.GeminiCLI = Config.GeminiCLI;
+        c.SeenDefaults = Config.SeenDefaults;
         Config = c;
         try { c.Save(); } catch (Exception e) { Message = "Настройки не сохранились: " + e.Message; }
         _ = StartServices();
@@ -134,21 +139,50 @@ public sealed class Core
 
     string? ApplySystem(bool refreshPac)
     {
-        var wasSet = ClaudeSettings.Proxy() == Config.ProxyUrl;
-        if (!wasSet)
-        {
-            try { ClaudeSettings.Set(Config.ProxyUrl, Config.HostT); }
-            catch (Exception e) { return e.Message; }
-            announceOn = true;
-        }
+        if (Integrations(on: true) is { } e) return e;
         var (foreign, error) = SystemProxy.Apply(Config.PacBase, refreshPac);
         ForeignPac = foreign;
         return error;
     }
 
+    /// Claude Code, codex и gemini — по галочкам. on — туннель включён: адрес прокси для них записан.
+    /// Вызывается при каждой проверке — восстанавливает стёртое.
+    string? Integrations(bool on)
+    {
+        var errors = new List<string>();
+        var cc = ClaudeSettings.Proxy();
+        if (on && Config.ClaudeCode)
+        {
+            if (cc != Config.ProxyUrl)
+            {
+                try { ClaudeSettings.Set(Config.ProxyUrl, Config.HostT); announceOn = true; }
+                catch (Exception e) { errors.Add(e.Message); }
+            }
+        }
+        else if (cc == Config.ProxyUrl)
+        {
+            try { ClaudeSettings.Set(null, Config.HostT); } catch { }
+        }
+        try { CliProxy.Install(Config); }
+        catch (Exception e) { errors.Add("Терминал: не удалось записать настройки — " + e.Message); }
+        CliProxy.SetState(on && (Config.CodexCLI || Config.GeminiCLI) ? Config.ProxyUrl : null);
+        return errors.Count > 0 ? string.Join("; ", errors) : null;
+    }
+
+    /// Галочки «что через туннель»: действуют сразу, туннель не переподключается.
+    public async Task SetToggle(Action<Config> change)
+    {
+        change(Config);
+        try { Config.Save(); } catch (Exception e) { Message = "Настройки не сохранились: " + e.Message; }
+        if (Integrations(on: Enabled && Config.IsComplete) is { } err) Message = err;
+        Fire();
+        await Refresh();
+    }
+
     void RemoveSystem()
     {
         try { if (ClaudeSettings.Proxy() == Config.ProxyUrl) ClaudeSettings.Set(null, Config.HostT); } catch { }
+        CliProxy.SetState(null);
         SystemProxy.Remove(Config.PacBase);
     }
 
@@ -171,39 +205,67 @@ public sealed class Core
         Fire();
         var e = ApplySystem(false);
         if (e != null) Message = e;
-        var work = TunnelSteps.Select(t => new Step(t)).ToList();
         var c = Config.Clone();
+        var cliNames = new List<string>();
+        if (c.CodexCLI && CliProxy.Detected("codex")) cliNames.Add("codex");
+        if (c.GeminiCLI && CliProxy.Detected("gemini")) cliNames.Add("gemini");
+        var cliWhat = string.Join(" и ", cliNames);
+        var titles = TunnelSteps.ToList();
+        if (c.ClaudeCode) titles.Add(ClaudeStep);
+        if (cliNames.Count > 0) titles.Add(string.Join(" и ", cliNames.Select(n => n == "codex" ? "Codex" : "Gemini")) + " в терминале → туннель");
+        titles.Add(SitesStep);
+        var work = titles.Select(t => new Step(t)).ToList();
+        var i = 0;
 
         var running = Tunnel.Running;
-        work[0].Ok = running;
-        work[0].Detail = running ? "" : (Tunnel.LastError.Length > 0 ? Tunnel.LastError : "подключаюсь…");
+        work[i].Ok = running;
+        work[i].Detail = running ? "" : (Tunnel.LastError.Length > 0 ? Tunnel.LastError : "подключаюсь…");
+        i++;
 
         var (ip, loc) = await Net.Trace(c.ProxyUrl);
         var expected = await Task.Run(() => Net.ResolveIPv4(c.HostT));
         var ipOk = ip.Length > 0 && loc != "RU" && (expected == null || ip == expected);
-        work[1].Ok = ipOk;
-        work[1].Detail = ip.Length == 0 ? "нет ответа" : $"{ip}, {loc}" + (!ipOk && expected != null ? $" — ожидался {expected}" : "");
+        work[i].Ok = ipOk;
+        work[i].Detail = ip.Length == 0 ? "нет ответа" : $"{ip}, {loc}" + (!ipOk && expected != null ? $" — ожидался {expected}" : "");
+        i++;
 
-        var cc = ClaudeSettings.Proxy();
-        work[2].Ok = cc == c.ProxyUrl;
-        work[2].Detail = cc == c.ProxyUrl ? "прокси в ~/.claude/settings.json" : "прокси не задан — Claude Code пойдёт мимо туннеля";
+        if (c.ClaudeCode)
+        {
+            var cc = ClaudeSettings.Proxy();
+            work[i].Ok = cc == c.ProxyUrl;
+            work[i].Detail = cc == c.ProxyUrl ? "в терминале и в VS Code, целиком. Прокси в ~/.claude/settings.json"
+                                              : "прокси не задан — Claude Code пойдёт мимо туннеля";
+            i++;
+        }
+
+        // codex и gemini в терминале: обёртки, их папка первой в PATH и адрес прокси для них.
+        if (cliNames.Count > 0)
+        {
+            var installed = CliProxy.Installed(c);
+            var state = CliProxy.State() == c.ProxyUrl;
+            work[i].Ok = installed && state;
+            work[i].Detail = !installed ? $"обёрток нет в PATH — {cliWhat} пойдут напрямую"
+                : !state ? $"адрес прокси для терминала не записан — {cliWhat} пойдут напрямую"
+                : "целиком, в окнах терминала, открытых после включения: cmd, PowerShell, Git Bash, терминал VS Code";
+            i++;
+        }
 
         var ours = SystemProxy.IsOurs(c.PacBase);
         var manual = SystemProxy.ManualProxyOn();
         var served = (await Net.Get(c.PacBase)).Contains($"PROXY 127.0.0.1:{c.LocalPort}");
-        work[3].Ok = ours && !manual && served;
+        work[i].Ok = ours && !manual && served;
         if (!ours)
-            work[3].Detail = ForeignPac ? "В Windows уже стоит другой PAC — программа его не трогает"
+            work[i].Detail = ForeignPac ? "В Windows уже стоит другой PAC — программа его не трогает"
                                         : "Windows не применяет PAC туннеля";
         else if (manual)
-            work[3].Detail = "В Windows включён ещё и обычный прокси (другая программа?) — браузер может пойти через него";
+            work[i].Detail = "В Windows включён ещё и обычный прокси (другая программа?) — браузер может пойти через него";
         else if (!served)
-            work[3].Detail = Pac.Error.Length > 0 ? Pac.Error : "PAC не раздаётся — эти сайты не откроются";
+            work[i].Detail = Pac.Error.Length > 0 ? Pac.Error : "PAC не раздаётся — эти сайты не откроются";
         else
         {
             var list = c.CleanDomains();
             var shown = string.Join(", ", list.Take(3)) + (list.Count > 3 ? $" и ещё {list.Count - 3}" : "");
-            work[3].Detail = $"в браузере и приложении Claude: {shown}. Остальные сайты — напрямую, как без туннеля; добавить — Настройки → «Через туннель»";
+            work[i].Detail = $"в браузере и приложении Claude: {shown}. Остальное — напрямую; добавить — Настройки → «Через туннель»";
         }
 
         Steps = work;

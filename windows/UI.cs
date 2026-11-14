@@ -333,9 +333,10 @@ sealed class StatusForm : Form
             return;
         }
         if (core.Steps.Count == 0) { (c.Title, c.Subtitle, c.Glyph, c.Accent) = ("Подключаюсь…", "", "…", Palette.Gray); return; }
-        if (core.Steps.Count == 4 && core.Steps.Take(3).All(s => s.Ok == true) && core.Steps[3].Ok == false)
+        // Не работают только сайты из списка (последний пункт) — Claude Code и терминал идут через туннель.
+        if (core.Steps[^1].Ok == false && core.Steps.Take(core.Steps.Count - 1).All(s => s.Ok == true))
         {
-            (c.Title, c.Subtitle, c.Glyph, c.Accent) = ("Claude Code — через туннель", "Сайты из списка в браузере — нет, см. ниже", "!", Palette.Orange);
+            (c.Title, c.Subtitle, c.Glyph, c.Accent) = ("Туннель работает", "кроме сайтов из списка в браузере — см. ниже", "!", Palette.Orange);
             return;
         }
         (c.Title, c.Subtitle, c.Glyph, c.Accent) = ("Соединение не готово", "Исправьте отмеченное ниже", "✕", Palette.Red);
@@ -380,6 +381,9 @@ sealed class SettingsForm : Form
     readonly TextBox tunnelUser = new() { Width = 160 };
     readonly NumericUpDown localPort = Num(8888), remotePort = Num(8888), pacPort = Num(8889);
     readonly CheckBox autostart = new() { Text = "Запускать при входе в Windows", AutoSize = true };
+    readonly CheckBox claudeCode = new() { Text = "Claude Code — через туннель", AutoSize = true };
+    readonly CheckBox codexCli = new() { Text = "Codex в терминале — через туннель", AutoSize = true };
+    readonly CheckBox geminiCli = new() { Text = "Gemini в терминале — через туннель", AutoSize = true };
     readonly CheckBox sendStats = new() { Text = "Отправлять анонимную статистику", AutoSize = true };
     readonly Label note = Ui.L("", Palette.Small, Palette.Sub, W);
     readonly System.Windows.Forms.Timer probeTimer = new() { Interval = 900 };
@@ -459,8 +463,18 @@ sealed class SettingsForm : Form
         var h4 = Ui.L("Через туннель", Palette.Header);
         h4.Margin = new Padding(0, 18, 0, 4);
         root.Controls.Add(h4);
+        // Галочки действуют сразу, туннель не переподключают.
+        claudeCode.CheckedChanged += async (_, _) => { if (loaded) await core.SetToggle(c => c.ClaudeCode = claudeCode.Checked); };
+        codexCli.CheckedChanged += async (_, _) => { if (loaded) await core.SetToggle(c => c.CodexCLI = codexCli.Checked); };
+        geminiCli.CheckedChanged += async (_, _) => { if (loaded) await core.SetToggle(c => c.GeminiCLI = geminiCli.Checked); };
+        root.Controls.Add(claudeCode);
+        root.Controls.Add(Ui.L("Claude Code в терминале и в VS Code идёт через сервер целиком, кроме российских сайтов. Программа пишет адрес в ~/.claude/settings.json. Выключено — напрямую. После переключения перезапустите Claude Code.", Palette.Small, Palette.Sub, W));
+        root.Controls.Add(codexCli);
+        root.Controls.Add(Ui.L("Команда codex идёт через сервер целиком, пока туннель включён: в cmd, PowerShell, Git Bash и терминале VS Code. Только в окнах, открытых после включения. Программа кладёт свою обёртку codex в свою папку и ставит её первой в PATH; выключите — уберёт. Расширения VS Code — напрямую.", Palette.Small, Palette.Sub, W));
+        root.Controls.Add(geminiCli);
+        root.Controls.Add(Ui.L("Команда gemini — так же, как codex.", Palette.Small, Palette.Sub, W));
         root.Controls.Add(domains);
-        root.Controls.Add(Ui.L("В браузере и приложении Claude через туннель идут только эти сайты; остальные открываются напрямую, как без туннеля, — сайт, которого нет в списке, через туннель не пойдёт. По одному домену в строке, поддомены включаются. Claude Code ходит через туннель целиком, кроме российских доменов.", Palette.Small, Palette.Sub, W));
+        root.Controls.Add(Ui.L("Браузер и приложение Claude: эти сайты — через сервер, остальные — напрямую. Один домен в строке, поддомены включаются. Изменения — после «Сохранить».", Palette.Small, Palette.Sub, W));
 
         // Дополнительно
         var h5 = Ui.L("Дополнительно", Palette.Header);
@@ -500,7 +514,7 @@ sealed class SettingsForm : Form
         var quit = new LinkLabel { Text = "Выйти из Proxy Tunnel", AutoSize = true, LinkColor = Palette.Red, Margin = new Padding(0, 14, 0, 0) };
         quit.LinkClicked += (_, _) => app.Quit();
         root.Controls.Add(quit);
-        root.Controls.Add(Ui.L("Туннель закроется, прокси для Claude и браузера снимутся.", Palette.Small, Palette.Sub, W));
+        root.Controls.Add(Ui.L("Туннель закроется: всё пойдёт напрямую.", Palette.Small, Palette.Sub, W));
 
         // фоновая проверка входа по ключу — через секунду после того, как адрес или порт перестали меняться
         host.TextChanged += (_, _) => { if (loaded) { probeTimer.Stop(); probeTimer.Start(); } Sync(); };
@@ -563,6 +577,9 @@ sealed class SettingsForm : Form
         pacPort.Value = Math.Clamp(c.PacPort, 1, 65535);
         domains.Lines = c.Domains.ToArray();
         try { autostart.Checked = Autostart.On; } catch { }
+        claudeCode.Checked = c.ClaudeCode;
+        codexCli.Checked = c.CodexCLI;
+        geminiCli.Checked = c.GeminiCLI;
         sendStats.Checked = AppUpdate.SendStats;
         note.Text = "";
         loaded = true;
@@ -726,7 +743,7 @@ public sealed class TrayApp : ApplicationContext
         if (!core.Config.IsComplete) state = "setup";
         else if (!core.Enabled) state = "off";
         else if (core.VerdictOK) state = "ok";
-        else if (core.Steps.Count == 4 && core.Steps.Take(3).All(s => s.Ok == true)) state = "partial";
+        else if (core.Steps.Count > 1 && core.Steps.Take(core.Steps.Count - 1).All(s => s.Ok == true)) state = "partial";
         else if (core.Steps.Count == 0) state = "off";
         else state = "fail";
         icon.Icon = Make(state);
@@ -735,7 +752,7 @@ public sealed class TrayApp : ApplicationContext
             "ok" => "Proxy Tunnel — Claude через туннель",
             "off" => "Proxy Tunnel — выключен",
             "setup" => "Proxy Tunnel — не настроен",
-            "partial" => "Proxy Tunnel — Claude Code через туннель",
+            "partial" => "Proxy Tunnel — работает, кроме сайтов в браузере",
             _ => "Proxy Tunnel — соединение не готово"
         };
     }
