@@ -162,14 +162,15 @@ struct AboutView: View {
             }
             .fixedSize(horizontal: false, vertical: true)
 
-            Link(destination: Config.howURL) { Text("Как работает, что идёт через сервер, ограничения").underline() }
-
-            Divider()
-
-            HStack(spacing: 0) {
-                Text("Инструмент лаборатории ")
-                Link(destination: Config.lifeOSURL) { Text("Life OS").underline() }
+            // Ссылки — столбиком, каждая на своей строке; так же в окне «?» на Windows.
+            VStack(alignment: .leading, spacing: 4) {
+                Link(destination: Config.toolPageURL) { Text("Подробнее об инструменте").underline() }
+                HStack(spacing: 0) {
+                    Text("Инструмент лаборатории ")
+                    Link(destination: Config.lifeOSURL) { Text("Life OS").underline() }
+                }
             }
+            .padding(.top, 2)
         }
         .font(.system(size: 12))
         .padding(14)

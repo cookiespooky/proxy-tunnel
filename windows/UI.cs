@@ -142,12 +142,14 @@ sealed class AboutForm : Form
         col.Controls.Add(Ui.L("2. Нажмите на верхнюю карточку — туннель включится.", width: W));
         col.Controls.Add(Ui.L("3. Перезапустите Claude Code и браузер.", width: W));
         col.Controls.Add(Ui.L("Сайты для туннеля — в настройках, раздел «Через туннель». Если что-то не так — загляните в журнал.", Palette.Small, Palette.Sub, W));
-        col.Controls.Add(Link("Подробнее об инструменте", Config.ToolPageUrl));
-        var lab = Ui.L("Инструмент лаборатории", width: W);
-        lab.Margin = new Padding(0, 12, 0, 3);
-        var lifeos = Link("Life OS", Config.LifeOSUrl);
-        lifeos.Margin = new Padding(0, 12, 0, 3);
-        col.Controls.Add(Ui.Row(lab, lifeos));
+        // Ссылки — столбиком, каждая на своей строке.
+        var more = Link("Подробнее об инструменте", Config.ToolPageUrl);
+        more.Margin = new Padding(0, 12, 0, 3);
+        col.Controls.Add(more);
+        const string lab = "Инструмент лаборатории ";
+        var lifeos = Link(lab + "Life OS", Config.LifeOSUrl);
+        lifeos.LinkArea = new LinkArea(lab.Length, "Life OS".Length);
+        col.Controls.Add(lifeos);
         Controls.Add(col);
     }
 }
